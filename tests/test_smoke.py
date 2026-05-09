@@ -65,3 +65,45 @@ def test_decision_json_parser() -> None:
     parsed = parse_decision_json(text)
     assert parsed is not None
     assert parsed["recommendation"] == "认购"
+
+
+def test_ths_basic_data_parser_column_format() -> None:
+    from src.data.ths_client import _parse_table_to_dict_by_code
+
+    payload = {
+        "tables": {
+            "thscode": ["00700.HK", "09988.HK"],
+            "ths_corp_chi_name_stock": ["腾讯控股", "阿里巴巴"],
+            "ths_main_business_stock": ["互联网增值服务", "电商及云计算"],
+        }
+    }
+    out = _parse_table_to_dict_by_code(
+        payload, ["00700.HK", "09988.HK"], ["ths_corp_chi_name_stock", "ths_main_business_stock"]
+    )
+    assert out["00700.HK"]["ths_corp_chi_name_stock"] == "腾讯控股"
+    assert out["09988.HK"]["ths_main_business_stock"] == "电商及云计算"
+
+
+def test_ths_edb_parser_column_format() -> None:
+    from src.data.ths_client import _parse_edb_payload
+
+    payload = {
+        "tables": {
+            "time": ["2025-01-31", "2025-02-28", "2025-03-31"],
+            "M002820027": [4.5, 4.4, 4.3],
+            "M002824001": [7.78, 7.79, 7.80],
+        }
+    }
+    out = _parse_edb_payload(payload, {"HIBOR_1M": "M002820027", "USD_HKD": "M002824001"})
+    assert len(out["HIBOR_1M"]) == 3
+    assert out["HIBOR_1M"][-1]["value"] == 4.3
+    assert out["USD_HKD"][0]["date"] == "2025-01-31"
+
+
+def test_rag_bge_query_prefix_detection() -> None:
+    from src.data.rag import ProspectusRAG
+
+    rag_bge = ProspectusRAG(project_id="t", embedding_model="BAAI/bge-base-zh-v1.5")
+    rag_minilm = ProspectusRAG(project_id="t", embedding_model="sentence-transformers/all-MiniLM-L6-v2")
+    assert rag_bge._is_bge_zh() is True
+    assert rag_minilm._is_bge_zh() is False

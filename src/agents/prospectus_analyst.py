@@ -82,12 +82,19 @@ class ProspectusAnalystAgent(BaseAgent):
 
     def run(self, ctx: AgentContext) -> AgentReport:
         evidence = self._gather_evidence(ctx)
+        basic = ctx.extras.get("company_basic") or {}
+        basic_block = ""
+        if basic:
+            lines = [f"- {k}: {v}" for k, v in basic.items() if v not in (None, "", "--")]
+            if lines:
+                basic_block = "# 公司基础信息（同花顺）\n" + "\n".join(lines) + "\n\n"
 
         user_msg = (
             f"# 待分析公司\n"
             f"- 名称：{ctx.company_name}\n"
             f"- 拟上市代码：{ctx.ticker}\n"
             f"- 所属行业：{ctx.industry}\n\n"
+            f"{basic_block}"
             f"# 招股书检索证据\n\n{evidence}\n\n"
             f"请基于以上证据生成完整的招股书深度分析报告。"
         )

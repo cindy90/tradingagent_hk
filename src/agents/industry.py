@@ -31,8 +31,24 @@ class IndustryAgent(TemplateAgent):
             evidence = "\n\n".join(
                 f"[P.{h['page_start']}-{h['page_end']}] {h['text'][:1200]}" for h in hits
             )
+
+        # 同花顺行业研报：只取标题/券商/评级/摘要，不喂全文
+        research = ctx.extras.get("industry_research") or []
+        research_block = ""
+        if research:
+            items = []
+            for r in research[:15]:
+                title = r.get("title") or r.get("TITLE") or ""
+                broker = r.get("broker") or r.get("BROKER") or r.get("orgName", "")
+                date = r.get("date") or r.get("publishDate") or r.get("DECLAREDATE") or ""
+                rating = r.get("rating") or r.get("RATING") or ""
+                abstract = (r.get("abstract") or r.get("ABSTRACT") or "")[:300]
+                items.append(f"- [{date}] {broker} | {title} | 评级: {rating}\n  摘要: {abstract}")
+            research_block = "# 同花顺行业研报摘要\n" + "\n".join(items) + "\n\n"
+
         return (
             f"# 项目\n{ctx.company_name} ({ctx.ticker})  行业: {ctx.industry}\n\n"
+            f"{research_block}"
             f"# 招股书行业相关段落\n{evidence}\n\n"
             f"请输出完整行业研究报告。"
         )

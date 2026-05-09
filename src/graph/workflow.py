@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -34,6 +35,7 @@ from src.agents.summarizer import Summarizer
 from src.agents.tech_trend import TechTrendAgent
 from src.data.prospectus import ProspectusLoader
 from src.data.rag import ProspectusRAG
+from src.data.ths_client import THSClient
 from src.llm import LLMClient
 
 
@@ -55,6 +57,46 @@ class CornerstoneWorkflow:
             RiskAgent(self.llm, self.summarizer),
             DecisionAgent(self.llm),
         ]
+
+    @staticmethod
+    def _prefetch_ths(ticker: str, industry: str) -> dict:
+        """跑 Agent 前先把 THS_BD/THS_EDB/THS_DR 数据预取一遍，丢到 ctx.extras。
+
+        失败时返回空字典对应键，下游 Agent 自行处理空值。
+        """
+        ths = THSClient()
+        if not ths.configured:
+            logger.info("THS 未配置，跳过基础数据/宏观/研报预取")
+            return {}
+
+        code = ticker if "." in ticker else f"{ticker.zfill(5)}.HK"
+        out: dict[str, Any] = {}
+
+        try:
+            bd = ths.basic_data(codes=code)
+            out["company_basic"] = bd.get(code, {}) if isinstance(bd, dict) else {}
+            logger.info(f"[Prefetch] basic_data 字段数: {len(out['company_basic'])}")
+        except Exception as e:
+            logger.warning(f"[Prefetch] basic_data 失败: {e}")
+            out["company_basic"] = {}
+
+        try:
+            macro = ths.edb()
+            out["macro_indicators"] = macro
+            logger.info(f"[Prefetch] EDB 指标数: {len(macro)}")
+        except Exception as e:
+            logger.warning(f"[Prefetch] edb 失败: {e}")
+            out["macro_indicators"] = {}
+
+        try:
+            reports = ths.research_reports(codes=code, industry=industry)
+            out["industry_research"] = reports[:20]  # 限制条数控制 token
+            logger.info(f"[Prefetch] 研报条数: {len(out['industry_research'])}")
+        except Exception as e:
+            logger.warning(f"[Prefetch] research_reports 失败: {e}")
+            out["industry_research"] = []
+
+        return out
 
     @staticmethod
     def _build_ctx(
@@ -105,7 +147,11 @@ class CornerstoneWorkflow:
         prospectus_pdf: str | Path | None = None,
         extras: dict | None = None,
     ) -> AgentContext:
-        ctx = self._build_ctx(ticker, company_name, industry, prospectus_pdf, extras)
+        merged_extras = dict(extras or {})
+        prefetched = self._prefetch_ths(ticker, industry)
+        merged_extras.update(prefetched)
+
+        ctx = self._build_ctx(ticker, company_name, industry, prospectus_pdf, merged_extras)
         logger.info(f"=== 工作流启动: {ctx.project_id} ===")
 
         for i, agent in enumerate(self.steps, start=1):

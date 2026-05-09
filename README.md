@@ -155,6 +155,11 @@ THS_REFRESH_TOKEN=<你的 refresh_token>
 - `get_access_token` / `update_access_token` — token 自动管理（带本地缓存 + 401 自动刷新）
 - `report_query` — 公告查询，支持按代码 / 类型 / 日期 / 关键词筛选
 - 招股书 PDF 自动下载到 `data/prospectus/<ticker>.pdf`
+- `basic_data_service` (THS_BD) — 公司基础信息（中英文名/主营/上市日期/实控人/股东等），喂入招股书 Agent
+- `edb_service` (THS_EDB) — 宏观/流动性指标时间序列（HIBOR、HSI PE、USD/HKD、CPI、PMI、IPO 集资额），喂入宏观 Agent
+- `data_report` (THS_DR) — 行业研报列表，喂入行业 Agent
+
+> 端点路径可通过 `.env` 的 `THS_ENDPOINT_*` 覆盖；EDB 指标编码集合在 `src/data/ths_client.py` 顶部 `DEFAULT_HK_MACRO_EDB_CODES` 可调整。
 
 **自动获取招股书的流程：**
 
@@ -243,12 +248,12 @@ python cli.py show-config
 ## 七、当前阶段的 TODO
 
 - [x] 同花顺 QuantAPI 接入：token 管理、`report_query`、招股书 PDF 自动下载
-- [ ] 同花顺 `THS_BD` / `THS_DR` / `THS_EDB` 接入：行业基础信息、行业研报、宏观指标
+- [x] 同花顺 `THS_BD` / `THS_DR` / `THS_EDB` 接入：公司基础信息、行业研报、宏观指标
+- [x] 中文 embedding 切到 BGE-zh-v1.5（可通过 `EMBEDDING_MODEL` 调整为 small/large）
 - [ ] 港交所披露易爬虫实现
 - [ ] akshare 港股财务接口字段在不同版本的兼容（当前已做容错）
-- [ ] 中文 embedding 模型替换（默认 MiniLM 中文一般，可换 BGE-zh）
 - [ ] LangGraph 替换线性 workflow（如需图状条件分支）
-- [ ] 单元测试 + 历史 IPO 回测脚本
+- [ ] 单元测试 + 历史 IPO 回测脚本（按已上市公司回看基石认购效果）
 
 ---
 

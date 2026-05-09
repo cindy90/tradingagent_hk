@@ -46,9 +46,122 @@ PROSPECTUS_TITLE_KEYWORDS = [
     "PHIP",
 ]
 
+# THS_BD 常用基础信息字段（公司层面静态/低频数据）。
+# 字段名按 iFinD 文档命名；不同套餐可能有差异，缺失字段会自动忽略。
+DEFAULT_BASIC_DATA_INDICATORS_HK = [
+    "ths_corp_chi_name_stock",           # 公司中文名称
+    "ths_corp_eng_name_stock",           # 公司英文名称
+    "ths_main_business_stock",           # 主营业务
+    "ths_listed_date_stock",             # 上市日期
+    "ths_thscode_industry_name_stock",   # 同花顺行业
+    "ths_gics_lv4_industry_stock",       # GICS 四级行业
+    "ths_actual_controller_stock",       # 实际控制人
+    "ths_top_holders_stock",             # 主要股东
+    "ths_register_capital_stock",        # 注册资本
+    "ths_employee_num_stock",            # 员工人数
+    "ths_business_scope_stock",          # 经营范围
+    "ths_office_addr_stock",             # 办公地址
+]
+
+# 港股市场宏观与流动性相关 EDB 指标（示例代码，需对照 iFinD EDB 实际编码）
+DEFAULT_HK_MACRO_EDB_CODES = {
+    "HIBOR_1M": "M002820027",       # 1 个月港元 HIBOR
+    "HIBOR_3M": "M002820028",       # 3 个月港元 HIBOR
+    "USD_HKD": "M002824001",        # 美元/港元汇率
+    "HSI_PE": "M002820055",         # 恒指 PE
+    "HK_IPO_AMOUNT": "M002930200",  # 港股 IPO 月度集资额（示例）
+    "CN_CPI_YOY": "M001620256",     # 内地 CPI 同比
+    "CN_PMI": "M001620251",         # 内地 PMI
+}
+
 
 class THSAPIError(RuntimeError):
     pass
+
+
+def _parse_table_to_dict_by_code(
+    payload: dict, codes: list[str], indicators: list[str]
+) -> dict[str, dict]:
+    """basic_data 返回格式兼容解析：把行式/列式 payload 转成 {code: {indicator: value}}."""
+    rows = (
+        payload.get("tables")
+        or payload.get("data")
+        or payload.get("result")
+        or []
+    )
+    out: dict[str, dict] = {code: {} for code in codes}
+
+    if isinstance(rows, dict):
+        # 列式：{thscode: [...], indicator1: [...], indicator2: [...]}
+        keys = list(rows.keys())
+        if not keys:
+            return out
+        n = len(rows[keys[0]]) if isinstance(rows[keys[0]], list) else 0
+        for i in range(n):
+            code_key = "thscode" if "thscode" in rows else ("THSCODE" if "THSCODE" in rows else None)
+            code = rows[code_key][i] if code_key else codes[i] if i < len(codes) else None
+            if code is None:
+                continue
+            for k in keys:
+                if k.lower() == "thscode":
+                    continue
+                out.setdefault(code, {})[k] = rows[k][i] if isinstance(rows[k], list) else None
+        return out
+
+    if isinstance(rows, list):
+        for r in rows:
+            code = r.get("thscode") or r.get("THSCODE") or r.get("code")
+            if code is None:
+                continue
+            entry = out.setdefault(code, {})
+            for k, v in r.items():
+                if k.lower() == "thscode":
+                    continue
+                entry[k] = v
+    return out
+
+
+def _parse_edb_payload(
+    payload: dict, indicators_map: dict[str, str]
+) -> dict[str, list[dict]]:
+    """edb 返回兼容解析。indicators_map 是 {别名: 指标编码}。"""
+    rows = (
+        payload.get("tables")
+        or payload.get("data")
+        or payload.get("result")
+        or []
+    )
+    code_to_alias = {v: k for k, v in indicators_map.items()}
+    out: dict[str, list[dict]] = {alias: [] for alias in indicators_map.keys()}
+
+    if isinstance(rows, dict):
+        # 列式：{date:[...], M0001:[...], M0002:[...]}
+        date_key = "time" if "time" in rows else ("date" if "date" in rows else None)
+        if date_key:
+            dates = rows[date_key]
+            for col, values in rows.items():
+                if col == date_key:
+                    continue
+                alias = code_to_alias.get(col, col)
+                if not isinstance(values, list):
+                    continue
+                for d, v in zip(dates, values):
+                    if v is None or v == "":
+                        continue
+                    out.setdefault(alias, []).append({"date": d, "value": v})
+        return out
+
+    if isinstance(rows, list):
+        for r in rows:
+            code = r.get("indicator") or r.get("INDICATOR") or r.get("indicode")
+            alias = code_to_alias.get(code, code) if code else None
+            if alias is None:
+                continue
+            out.setdefault(alias, []).append({
+                "date": r.get("time") or r.get("date") or r.get("TIME"),
+                "value": r.get("value") or r.get("VALUE"),
+            })
+    return out
 
 
 class THSClient:
@@ -266,6 +379,144 @@ class THSClient:
         except Exception as e:
             logger.warning(f"download_pdf 失败 {url}: {e}")
             return False
+
+    # ---------- THS_BD: 基础数据 ----------
+
+    @disk_cache(ttl_seconds=24 * 3600, namespace="ths")
+    def basic_data(
+        self,
+        codes: list[str] | str,
+        indicators: list[str] | None = None,
+        indi_params: list[str] | None = None,
+    ) -> dict[str, dict]:
+        """THS_BD 等价接口：批量取证券静态/基础字段。
+
+        参数:
+            codes:        证券代码（"00700.HK" 或 list）
+            indicators:   字段名列表，默认为港股公司常用基础字段（见 DEFAULT_BASIC_DATA_INDICATORS_HK）
+            indi_params:  与 indicators 等长的参数列表（部分字段需要参数，如截止日期）
+
+        返回:  {ticker: {indicator_name: value}}
+        """
+        if not self.configured:
+            return {}
+        s = get_settings()
+        if isinstance(codes, str):
+            code_list = [codes]
+        else:
+            code_list = list(codes)
+        codes_str = ",".join(code_list)
+        indicators = indicators or DEFAULT_BASIC_DATA_INDICATORS_HK
+        ind_str = ",".join(indicators)
+        para_str = ";".join(indi_params or ["" for _ in indicators])
+
+        body = {
+            "codes": codes_str,
+            "indipara": ind_str,
+            "indiparams": para_str,
+        }
+        try:
+            payload = self._post(s.ths_endpoint_basic_data, body)
+        except Exception as e:
+            logger.warning(f"basic_data failed: {e}")
+            return {}
+
+        return _parse_table_to_dict_by_code(payload, code_list, indicators)
+
+    # ---------- THS_EDB: 经济数据库 ----------
+
+    @disk_cache(ttl_seconds=12 * 3600, namespace="ths")
+    def edb(
+        self,
+        indicators: dict[str, str] | list[str] | None = None,
+        start_date: str = "2022-01-01",
+        end_date: str | None = None,
+    ) -> dict[str, list[dict]]:
+        """THS_EDB 等价接口：批量取宏观/行业经济指标时间序列。
+
+        参数:
+            indicators:  {别名: 指标编码} 或 [指标编码,...]；不传则用港股宏观默认集合。
+            start_date / end_date: YYYY-MM-DD
+
+        返回: {别名/指标编码: [{"date":..., "value":...}, ...]}
+        """
+        if not self.configured:
+            return {}
+        s = get_settings()
+        end_date = end_date or time.strftime("%Y-%m-%d")
+
+        if indicators is None:
+            indicators_map = DEFAULT_HK_MACRO_EDB_CODES
+        elif isinstance(indicators, list):
+            indicators_map = {code: code for code in indicators}
+        else:
+            indicators_map = indicators
+
+        codes_str = ",".join(indicators_map.values())
+        body = {
+            "indicators": codes_str,
+            "startdate": start_date,
+            "enddate": end_date,
+        }
+        try:
+            payload = self._post(s.ths_endpoint_edb, body)
+        except Exception as e:
+            logger.warning(f"edb failed: {e}")
+            return {}
+
+        return _parse_edb_payload(payload, indicators_map)
+
+    # ---------- THS_DR: 研究报告 ----------
+
+    @disk_cache(ttl_seconds=24 * 3600, namespace="ths")
+    def research_reports(
+        self,
+        codes: list[str] | str | None = None,
+        industry: str | None = None,
+        start_date: str = "2024-01-01",
+        end_date: str | None = None,
+        report_type: str | None = None,
+        keyword: str | None = None,
+        limit: int = 30,
+    ) -> list[dict]:
+        """THS_DR 等价接口：拉取研究报告/行业研报列表。
+
+        codes / industry 至少传一个。返回示例：
+            [{"date": "2025-04-08", "title": "...", "broker": "...",
+              "rating": "买入", "abstract": "...", "pdfURL": "..."}]
+        """
+        if not self.configured:
+            return []
+        s = get_settings()
+        end_date = end_date or time.strftime("%Y-%m-%d")
+
+        body: dict[str, Any] = {
+            "startDate": start_date,
+            "endDate": end_date,
+            "limit": limit,
+        }
+        if codes:
+            body["codes"] = ",".join(codes) if isinstance(codes, list) else codes
+        if industry:
+            body["industry"] = industry
+        if report_type:
+            body["reportType"] = report_type
+        if keyword:
+            body["keyword"] = keyword
+
+        try:
+            payload = self._post(s.ths_endpoint_data_report, body)
+        except Exception as e:
+            logger.warning(f"research_reports failed: {e}")
+            return []
+
+        rows = (
+            payload.get("tables")
+            or payload.get("data")
+            or payload.get("result")
+            or []
+        )
+        return rows if isinstance(rows, list) else [rows]
 
     def auto_fetch_prospectus(
         self,

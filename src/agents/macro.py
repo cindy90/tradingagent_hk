@@ -25,10 +25,28 @@ class MacroAgent(TemplateAgent):
 
     def build_user_message(self, ctx: AgentContext) -> str:
         hsi = get_hsi_index()
-        macro = ctx.extras.get("macro_indicators", {})
+        macro = ctx.extras.get("macro_indicators", {}) or {}
+
+        # 把 EDB 时间序列压缩为"最新值 / 6 个月前 / 12 个月前 / 趋势"，省 token
+        macro_lines = []
+        for name, series in macro.items():
+            if not series:
+                macro_lines.append(f"- {name}: (无数据)")
+                continue
+            latest = series[-1]
+            prev6 = series[-min(6, len(series))] if len(series) > 1 else None
+            prev12 = series[-min(12, len(series))] if len(series) > 1 else None
+            parts = [f"最新({latest.get('date')}): {latest.get('value')}"]
+            if prev6:
+                parts.append(f"6 期前({prev6.get('date')}): {prev6.get('value')}")
+            if prev12 and prev12 is not prev6:
+                parts.append(f"12 期前({prev12.get('date')}): {prev12.get('value')}")
+            macro_lines.append(f"- {name}: " + " | ".join(parts))
+        macro_block = "\n".join(macro_lines) if macro_lines else "(同花顺 EDB 未返回数据)"
+
         return (
             f"# 项目\n{ctx.company_name} ({ctx.ticker})  行业: {ctx.industry}\n\n"
-            f"# 当前恒生指数\n{hsi}\n\n"
-            f"# 宏观指标（同花顺/外部）\n{macro}\n\n"
+            f"# 当前恒生指数（akshare）\n{hsi}\n\n"
+            f"# 宏观指标（同花顺 EDB）\n{macro_block}\n\n"
             f"请输出宏观策略分析。"
         )

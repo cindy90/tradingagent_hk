@@ -37,6 +37,19 @@ class Settings(BaseSettings):
         default="INFO", alias="LOG_LEVEL"
     )
 
+    embedding_model: str = Field(
+        default="BAAI/bge-base-zh-v1.5", alias="EMBEDDING_MODEL"
+    )
+    embedding_device: str = Field(default="cpu", alias="EMBEDDING_DEVICE")
+
+    ths_endpoint_basic_data: str = Field(
+        default="basic_data_service", alias="THS_ENDPOINT_BASIC_DATA"
+    )
+    ths_endpoint_edb: str = Field(default="edb_service", alias="THS_ENDPOINT_EDB")
+    ths_endpoint_data_report: str = Field(
+        default="data_report", alias="THS_ENDPOINT_DATA_REPORT"
+    )
+
     def ensure_dirs(self) -> None:
         for p in (self.data_dir, self.cache_dir, self.reports_dir, self.prospectus_dir):
             p.mkdir(parents=True, exist_ok=True)
