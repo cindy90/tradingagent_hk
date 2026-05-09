@@ -170,6 +170,112 @@ def test_workflow_extras_typed_access() -> None:
     assert ex.misc["custom_field"] == "hello"
 
 
+def test_decision_schema_validation_passes_on_complete_json() -> None:
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "认购",
+        "confidence": "中",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {
+            "low": 50.0, "mid": 70.0, "high": 90.0,
+            "anchor_method": "PE", "anchor_logic": "对标可比公司中位数 25x",
+        },
+        "ipo_pricing_view": "合理",
+        "key_supports": ["技术领先", "客户集中度下降"],
+        "key_risks": ["毛利率波动"],
+        "deal_conditions": [],
+        "monitoring_kpis": ["季度营收"],
+    }
+    result, err = validate_decision(parsed)
+    assert result is not None
+    assert err == ""
+    assert result.recommendation == "认购"
+
+
+def test_decision_schema_validation_fails_on_missing_field() -> None:
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "认购",
+        "confidence": "中",
+        # 缺 suggested_amount_usd_million / valuation_range_hkd_billion
+        "ipo_pricing_view": "合理",
+        "key_supports": ["x"],
+        "key_risks": ["y"],
+    }
+    result, err = validate_decision(parsed)
+    assert result is None
+    assert "suggested_amount_usd_million" in err or "valuation_range_hkd_billion" in err
+
+
+def test_decision_schema_validation_fails_on_wrong_array_length() -> None:
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "认购",
+        "confidence": "中",
+        "suggested_amount_usd_million": [10.0],  # ← 应为 2 个
+        "valuation_range_hkd_billion": {
+            "mid": 70.0, "anchor_method": "PE", "anchor_logic": "x",
+        },
+        "ipo_pricing_view": "合理",
+        "key_supports": ["x"],
+        "key_risks": ["y"],
+    }
+    result, err = validate_decision(parsed)
+    assert result is None
+
+
+def test_decision_agent_retries_on_invalid_schema() -> None:
+    """验证 DecisionAgent 在第一次 schema 校验失败后会触发重试。"""
+    from src.agents.base import AgentContext
+    from src.agents.decision import DecisionAgent
+    from src.agents.extras import WorkflowExtras
+    from src.llm import LLMClient
+    from src.llm.client import LLMResponse
+    from src.llm.router import ModelTier
+    from pathlib import Path
+    import tempfile
+
+    INVALID = '```json\n{"recommendation": "认购"}\n```\n论述: ...'
+    VALID = (
+        '```json\n'
+        '{"recommendation": "审慎参与", "confidence": "中",'
+        ' "suggested_amount_usd_million": [10, 20],'
+        ' "valuation_range_hkd_billion": {"mid": 70, "anchor_method": "PE", "anchor_logic": "x"},'
+        ' "ipo_pricing_view": "合理",'
+        ' "key_supports": ["a"], "key_risks": ["b"],'
+        ' "deal_conditions": [], "monitoring_kpis": []}\n'
+        '```\n论述: ...'
+    )
+
+    class _Provider:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *, model, system, messages, max_tokens, temperature, cached_system_blocks):
+            self.calls += 1
+            text = INVALID if self.calls == 1 else VALID
+            return LLMResponse(text=text, input_tokens=10, output_tokens=10, model=model)
+
+    p = _Provider()
+    llm = LLMClient(provider=p, provider_name="mock")
+    agent = DecisionAgent(llm)
+
+    with tempfile.TemporaryDirectory() as d:
+        ctx = AgentContext(
+            project_id="t", ticker="00000", company_name="测试", industry="x",
+            reports_dir=Path(d), rag=None, extras=WorkflowExtras(),
+        )
+        ctx.briefs["macro"] = "宏观 brief"
+        report = agent.run(ctx)
+
+    assert p.calls == 2
+    assert report.metadata["validated"] is True
+    assert ctx.extras.decision_json["recommendation"] == "审慎参与"
+
+
 def test_fatal_flag_default_and_subclasses() -> None:
     from src.agents.decision import DecisionAgent
     from src.agents.industry import IndustryAgent
