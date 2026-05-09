@@ -10,6 +10,7 @@
 2. Outcome 字段紧贴港股 IPO 基石场景（6 个月禁售期、破发率、流动性）。
 3. SQLite 而非 JSON 文件：天然支持查询/聚合/JOIN，单机够用，零运维。
 """
+from .case_rag import CaseRAG, reindex_all_cases, render_case_summary
 from .models import (
     AgentScoreCard,
     ProspectusScoreCard,
@@ -23,6 +24,7 @@ from .models import (
     Outcome,
     Score,
 )
+from .postmortem import PostmortemAgent
 from .store import FeedbackStore
 
 __all__ = [
@@ -38,4 +40,8 @@ __all__ = [
     "Outcome",
     "Score",
     "FeedbackStore",
+    "PostmortemAgent",
+    "CaseRAG",
+    "reindex_all_cases",
+    "render_case_summary",
 ]

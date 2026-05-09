@@ -277,8 +277,42 @@ python cli.py stats
 python cli.py export-predictions --out reports/all_predictions.csv
 ```
 
-数据积累到 5+ 案例后，Phase C 的 Postmortem Agent + Case RAG 会自动把历史决策的
-经验/教训注入到新分析中——这就是系统的"自我迭代"。
+### 闭环关键：自动复盘 + 历史案例注入
+
+录入实际表现后，跑一次复盘 Agent 会做三件事：
+1. 客观对比"当时的决议"与"实际表现"，输出结构化 Score（估值误差、风险命中率、根因分类）
+2. 写一份 markdown 复盘备忘录到 `reports/<project_id>/POSTMORTEM.md`
+3. **把这次的"教训章节"自动索引到 CaseRAG，让下一个项目分析时能用上**
+
+```bash
+# 跑复盘（决议 + 实际结果都需要在 DB 里）
+python cli.py review --project-id 02670_20260509_104530
+
+# 检索某行业 / 某规模的历史相似案例
+python cli.py similar --industry 工业机器人 --valuation-mid 80
+
+# 切换 embedding 模型后重建 CaseRAG 索引
+python cli.py reindex-cases
+```
+
+**自我迭代是怎么发生的：**
+
+```
+第 1 个项目: 跑 analyze → 决议 → 上市 → record-outcome → review
+                                             │
+                                             ▼
+                                        CaseRAG 索引 +1
+                                             │
+                                             ▼
+第 2 个项目: 跑 analyze → workflow 启动时自动检索 CaseRAG
+            → 找到第 1 个项目（同行业 + 类似规模 + 已有结果）
+            → 把第 1 次的"教训章节"注入到 cached_blocks
+            → 所有 Agent（特别是 Decision）都看到历史教训
+            → 决议自然规避同类错误
+```
+
+数据积累越多，系统越聪明。**这是这套系统区别于一次性分析工具的核心壁垒**——
+机构里"投决会复盘文化"被显性化、自动化了。
 
 ### 案例：珞石机器人（Loctek Robotics）测试流程
 
@@ -342,6 +376,8 @@ cat reports/02670_*/_token_usage.md
 - [x] 中文 embedding 切到 BGE-zh-v1.5
 - [x] **闭环学习 Phase A**：每个 Agent 双产出（markdown + ScoreCard JSON）；
       预测自动落 SQLite；CLI `record-outcome` / `list-predictions` / `export-predictions` / `stats`
+- [x] **闭环学习 Phase C**：PostmortemAgent 自动复盘；CaseRAG 历史案例索引；
+      新分析自动检索相似案例注入 prompt；CLI `review` / `similar` / `reindex-cases`
 - [ ] 港交所披露易爬虫实现
 - [ ] akshare 港股财务接口字段在不同版本的兼容（当前已做容错）
 - [ ] LangGraph 替换线性 workflow（如需图状条件分支）

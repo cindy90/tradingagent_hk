@@ -20,7 +20,7 @@ from rich.console import Console
 from config import get_settings
 from src.data.hkex_client import download_document
 from src.data.ths_client import THSClient
-from src.feedback import FeedbackStore, Outcome
+from src.feedback import CaseRAG, FeedbackStore, Outcome, PostmortemAgent, reindex_all_cases
 from src.graph import CornerstoneWorkflow
 from src.reports import write_final_summary
 
@@ -211,9 +211,92 @@ def stats() -> None:
     _setup_logging()
     store = FeedbackStore()
     s = store.stats_summary()
+    rag = CaseRAG()
+    try:
+        case_count = rag.count()
+    except Exception:
+        case_count = 0
     console.print(f"[bold cyan]投决归档统计[/bold cyan]")
     for k, v in s.items():
         console.print(f"  {k}: {v}")
+    console.print(f"  case_rag_indexed: {case_count}")
+
+
+@app.command()
+def review(
+    project_id: str = typer.Option(..., "--project-id", "-p"),
+) -> None:
+    """对指定 project 跑 PostmortemAgent，输出复盘 memo + 落库 Score + 索引到 CaseRAG。"""
+    _setup_logging()
+    s = get_settings()
+    provider = (s.llm_provider or "anthropic").lower()
+    key_map = {"anthropic": s.anthropic_api_key, "kimi": s.kimi_api_key, "deepseek": s.deepseek_api_key}
+    if not key_map.get(provider):
+        console.print(f"[red]LLM_PROVIDER={provider} 但对应 API Key 未配置[/red]")
+        raise typer.Exit(code=1)
+
+    store = FeedbackStore()
+    pred = store.get_prediction_by_project(project_id)
+    if pred is None:
+        console.print(f"[red]未找到 project_id={project_id}[/red]")
+        raise typer.Exit(code=2)
+    pred_row = store._conn.execute(
+        "SELECT id FROM predictions WHERE project_id=?", (project_id,)
+    ).fetchone()
+    pred_id = pred_row["id"]
+
+    if store.latest_outcome(pred_id) is None:
+        console.print(f"[yellow]该 prediction 尚未录入 outcome，无法复盘[/yellow]")
+        console.print(f"先运行: ta-hk record-outcome -p {project_id} ...")
+        raise typer.Exit(code=3)
+
+    console.print(f"[cyan]开始复盘 {project_id} ...[/cyan]")
+    score = PostmortemAgent().run(pred_id, store=store)
+    if score is None:
+        console.print(f"[red]复盘失败[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]✓ 复盘完成[/green]")
+    console.print(f"  recommendation_score: {score.recommendation_score:.2f}")
+    console.print(f"  valuation_within_range: {score.valuation_within_range}")
+    console.print(f"  valuation_error_pct: {score.valuation_error_pct}")
+    console.print(f"  风险命中: {score.risks_realized_count}/{score.risks_total_count}, "
+                  f"未识别风险: {score.unforeseen_risks_count}")
+    console.print(f"  根因: {score.error_root_causes}")
+    if pred.reports_dir_path:
+        console.print(f"\n  完整复盘 memo: {pred.reports_dir_path}/POSTMORTEM.md")
+
+
+@app.command()
+def similar(
+    industry: str = typer.Option(..., "--industry", "-i"),
+    valuation_mid: float | None = typer.Option(None, "--valuation-mid", help="目标公司估值中枢 亿港元"),
+    k: int = typer.Option(3, "--k"),
+) -> None:
+    """检索 CaseRAG 里行业/规模相近的历史案例（用于排查 case 注入是否生效）。"""
+    _setup_logging()
+    rag = CaseRAG()
+    if rag.count() == 0:
+        console.print("[yellow]CaseRAG 当前无案例。先 record-outcome + review 几个项目让它积累[/yellow]")
+        return
+    hits = rag.search(industry=industry, valuation_mid=valuation_mid, k=k)
+    if not hits:
+        console.print("[yellow]未检索到匹配案例[/yellow]")
+        return
+    for i, h in enumerate(hits, 1):
+        md = h["metadata"]
+        console.print(f"[bold cyan]案例 {i}: {md.get('ticker')} ({md.get('industry')})[/bold cyan]")
+        console.print(f"  估值中枢 {md.get('valuation_mid')} 亿 / 决议 {md.get('recommendation')} "
+                      f"/ D180 {md.get('d180_return', 0) * 100:.1f}%")
+        console.print(f"  距离: {h.get('distance')}")
+        console.print(f"  ─── 摘要 ───\n{h['text'][:600]}\n")
+
+
+@app.command("reindex-cases")
+def reindex_cases_cmd() -> None:
+    """从 SQLite 全量重建 CaseRAG 索引（embedding 模型切换或库损坏后用）。"""
+    _setup_logging()
+    n = reindex_all_cases()
+    console.print(f"[green]✓ 已重建 {n} 个案例[/green]")
 
 
 @app.command()

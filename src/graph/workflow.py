@@ -208,11 +208,20 @@ class CornerstoneWorkflow:
         industry: str,
         prospectus_pdf: str | Path | None = None,
         extras: dict | None = None,
+        use_case_rag: bool = True,
     ) -> AgentContext:
         prefetched = self._prefetch_ths(ticker, industry)
         wf_extras = WorkflowExtras.from_dict({**(extras or {}), **prefetched})
 
         ctx = self._build_ctx(ticker, company_name, industry, prospectus_pdf, wf_extras)
+
+        # 闭环关键 (Phase C): 检索历史相似案例，注入到 cached_blocks
+        if use_case_rag:
+            try:
+                self._inject_similar_cases(ctx)
+            except Exception as e:
+                logger.warning(f"CaseRAG 检索失败（不影响主流程）: {e}")
+
         logger.info(f"=== 工作流启动: {ctx.project_id} ===")
 
         for i, agent in enumerate(self.steps, start=1):
@@ -251,6 +260,42 @@ class CornerstoneWorkflow:
             logger.warning(f"prediction 落库失败（不影响报告产出）: {e}")
         logger.info(f"=== 工作流完成，报告目录: {ctx.reports_dir} ===")
         return ctx
+
+    @staticmethod
+    def _inject_similar_cases(ctx: AgentContext) -> None:
+        """从 CaseRAG 检索相似历史案例，把 prompt 文本拼到 ctx.cached_blocks 末尾。
+
+        策略：找 top-3 相似案例（行业 + 估值规模 + 已有 outcome），
+        渲染成 markdown 块，作为新的 cached_block 追加。
+        所有 Agent 通过 cached_system_blocks 都能看到，但 Decision 受益最大。
+        """
+        from src.feedback import CaseRAG
+        rag = CaseRAG()
+        if rag.count() == 0:
+            logger.info("CaseRAG 当前无历史案例，跳过注入")
+            return
+        # 估值规模未知（IPO 之前没决议），先按行业匹配
+        valuation_hint = None
+        if ctx.extras.peers:
+            # 用同行平均规模作为粗略 hint
+            mids = [
+                p.get("market_cap_hkd_b")
+                for p in ctx.extras.peers
+                if isinstance(p, dict) and p.get("market_cap_hkd_b")
+            ]
+            if mids:
+                valuation_hint = sum(mids) / len(mids)
+        hits = rag.search(industry=ctx.industry, valuation_mid=valuation_hint, k=3)
+        if not hits:
+            return
+        prompt_block = CaseRAG.format_for_prompt(hits)
+        if prompt_block:
+            ctx.cached_blocks.append(prompt_block)
+            logger.info(f"注入 {len(hits)} 个历史相似案例到 cached_blocks")
+            # 标记进 Prediction.cogalpha_features_used (后续 _persist_prediction 用)
+            features = ctx.extras.misc.setdefault("cogalpha_features", set())
+            if isinstance(features, set):
+                features.add("case_rag")
 
     def _write_ledger(self, ctx: AgentContext) -> None:
         from src.llm.pricing import estimate_total_cost_cny
@@ -293,6 +338,10 @@ class CornerstoneWorkflow:
         s = get_settings()
 
         score_cards = ctx.extras.misc.get("score_cards", {})
+        features_used = ["scoring_card"]
+        cog_features = ctx.extras.misc.get("cogalpha_features")
+        if cog_features:
+            features_used.extend(sorted(cog_features))
 
         p = Prediction(
             project_id=ctx.project_id,
@@ -321,7 +370,7 @@ class CornerstoneWorkflow:
             total_output_tokens=total_out,
             total_cache_read_tokens=total_cache,
             estimated_cost_cny=estimate_total_cost_cny(agg, tier_to_model),
-            cogalpha_features_used=["scoring_card"],
+            cogalpha_features_used=features_used,
             reports_dir_path=str(ctx.reports_dir),
             status="open",
         )

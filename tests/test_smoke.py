@@ -355,6 +355,86 @@ def test_feedback_store_round_trip(tmp_path) -> None:
     assert stats["outcomes_total"] == 1
 
 
+def test_render_case_summary_includes_key_fields() -> None:
+    from datetime import datetime
+    from src.feedback.case_rag import render_case_summary
+    from src.feedback.models import Outcome, Prediction, Score
+
+    p = Prediction(
+        project_id="t01", ticker="02670", company_name="珞石机器人",
+        industry="工业机器人", decision_date=datetime(2026, 5, 9),
+        recommendation="审慎参与", confidence="中",
+        valuation_low=60, valuation_mid=80, valuation_high=100,
+        anchor_method="PE", anchor_logic="对标可比 25x",
+        ipo_pricing_view="合理",
+        suggested_amount_low_usd_m=10, suggested_amount_high_usd_m=20,
+        key_supports=["技术领先", "客户多元"],
+        key_risks=["客户集中度"],
+        model_provider="kimi",
+    )
+    o = Outcome(prediction_id=1, recorded_date=datetime(2026, 11, 9),
+                ipo_actual_marketcap_hkd_billion=110.0,
+                d1_return=0.12, d180_return=-0.08,
+                was_broken_ipo_d180=True,
+                notable_events=["管理层变动"])
+    s = Score(prediction_id=1, score_date=datetime(2026, 11, 9),
+              recommendation_score=-0.2,
+              risks_total_count=1, risks_realized_count=0,
+              unforeseen_risks_count=2,
+              error_root_causes=["信息缺失", "黑天鹅"],
+              postmortem_memo="...内容...\n## 四、教训\n核心教训：客户集中度评估时应额外关注 ...")
+
+    text = render_case_summary(p, o, s)
+    assert "珞石机器人" in text
+    assert "客户集中度" in text
+    assert "D180 (禁售期满): -8.0%" in text
+    assert "教训" in text
+    assert "信息缺失" in text
+
+
+def test_postmortem_input_precomputes_valuation_error() -> None:
+    from datetime import datetime
+    from src.feedback.models import Outcome, Prediction
+    from src.feedback.postmortem import _build_postmortem_input
+
+    p = Prediction(
+        project_id="t02", ticker="x", company_name="x", industry="x",
+        decision_date=datetime.now(),
+        recommendation="认购", confidence="中",
+        valuation_low=60, valuation_mid=80, valuation_high=100,
+        anchor_method="PE", ipo_pricing_view="合理",
+        suggested_amount_low_usd_m=10, suggested_amount_high_usd_m=20,
+        key_risks=["a", "b"], model_provider="kimi",
+    )
+    o = Outcome(prediction_id=1, recorded_date=datetime.now(),
+                ipo_actual_marketcap_hkd_billion=120.0)
+    body, pre = _build_postmortem_input(p, o)
+    assert pre["valuation_error_pct"] == 0.5  # (120-80)/80 = 0.5
+    assert pre["valuation_within_range"] is False  # 120 > 100
+    assert pre["risks_total_count"] == 2
+    assert "120" in body
+
+
+def test_postmortem_input_handles_missing_outcome_fields() -> None:
+    """Outcome 字段大量为 None 时不应抛异常。"""
+    from datetime import datetime
+    from src.feedback.models import Outcome, Prediction
+    from src.feedback.postmortem import _build_postmortem_input
+
+    p = Prediction(
+        project_id="t03", ticker="x", company_name="x", industry="x",
+        decision_date=datetime.now(),
+        recommendation="观望", confidence="低",
+        valuation_mid=50, anchor_method="PS", ipo_pricing_view="偏高",
+        suggested_amount_low_usd_m=0, suggested_amount_high_usd_m=0,
+        model_provider="kimi",
+    )
+    o = Outcome(prediction_id=1, recorded_date=datetime.now())
+    body, pre = _build_postmortem_input(p, o)
+    assert pre["valuation_error_pct"] is None
+    assert pre["valuation_within_range"] is None
+
+
 def test_pricing_estimates_reasonable_values() -> None:
     from src.llm.pricing import estimate_cost_cny
 
