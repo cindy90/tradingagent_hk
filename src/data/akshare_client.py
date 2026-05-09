@@ -11,6 +11,30 @@ from loguru import logger
 from .cache import disk_cache
 
 
+# Windows + Clash Verge 等代理工具会写入系统全局代理（注册表 Internet Settings），
+# requests 默认 trust_env=True 会读取它，导致 akshare 调东方财富等国内 API 失败
+# (ProxyError: Unable to connect to proxy)。 akshare 的国内数据源完全不需要走代理，
+# 这里 monkey-patch requests.Session 让 trust_env=False，绕过系统代理。
+def _disable_requests_system_proxy() -> None:
+    try:
+        import requests
+        _orig_init = requests.Session.__init__
+
+        def _no_trust_env_init(self, *args, **kwargs):
+            _orig_init(self, *args, **kwargs)
+            self.trust_env = False
+
+        if getattr(requests.Session.__init__, "_patched_no_trust_env", False):
+            return
+        _no_trust_env_init._patched_no_trust_env = True  # type: ignore[attr-defined]
+        requests.Session.__init__ = _no_trust_env_init  # type: ignore[method-assign]
+    except ImportError:
+        pass
+
+
+_disable_requests_system_proxy()
+
+
 def _import_akshare():
     try:
         import akshare as ak  # noqa: F401

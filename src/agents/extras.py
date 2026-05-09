@@ -31,6 +31,9 @@ class WorkflowExtras:
     peer_recent_quotes: list = field(default_factory=list)
     recent_hk_ipos: list = field(default_factory=list)
 
+    # 目标公司本身的 iFinD 估值/财务（IPO 询价阶段也常已建档）
+    target_valuation: dict | None = None
+
     # Agent 间产物
     debate_outcome: Any = None
     decision_json: dict | None = None

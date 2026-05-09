@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,11 +16,17 @@ class Settings(BaseSettings):
     llm_provider: str = Field(default="anthropic", alias="LLM_PROVIDER")
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     kimi_api_key: str = Field(default="", alias="KIMI_API_KEY")
-    kimi_base_url: str = Field(default="https://api.moonshot.cn/v1", alias="KIMI_BASE_URL")
+    kimi_base_url: str = Field(
+        default="https://api.moonshot.cn/v1",
+        validation_alias=AliasChoices("KIMI_URL", "KIMI_BASE_URL"),
+    )
     deepseek_api_key: str = Field(default="", alias="DEEPSEEK_API_KEY")
     deepseek_base_url: str = Field(default="https://api.deepseek.com/v1", alias="DEEPSEEK_BASE_URL")
 
-    ths_refresh_token: str = Field(default="", alias="THS_REFRESH_TOKEN")
+    ths_refresh_token: str = Field(
+        default="",
+        validation_alias=AliasChoices("THS_REFRESH_TOKEN", "IFIND_REFRESH_TOKEN"),
+    )
     ths_token_cache: str = Field(default="", alias="THS_TOKEN_CACHE")
     ths_token_ttl: int = Field(default=21600, alias="THS_TOKEN_TTL")
     hkex_api_key: str = Field(default="", alias="HKEX_API_KEY")

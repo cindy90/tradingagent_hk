@@ -45,6 +45,31 @@ def analyze(
     no_prospectus: bool = typer.Option(False, "--no-prospectus", help="跳过招股书"),
     no_auto_fetch: bool = typer.Option(False, "--no-auto-fetch", help="禁用同花顺自动拉取招股书"),
     fetch_prefer: str = typer.Option("PHIP", "--fetch-prefer", help="自动拉取优先标题关键词: PHIP/Application/Prospectus"),
+    peers: str | None = typer.Option(
+        None,
+        "--peers",
+        help="可比公司港股代码列表，逗号分隔（4 或 5 位均可），如 '02432,09880,09660'。"
+        "提供后会用 iFinD SDK 拉这些公司近 90 天 K 线 + IPO 信息，填到 sentiment / comparable agent 的输入。",
+    ),
+    no_confirm_peers: bool = typer.Option(
+        False,
+        "--no-confirm-peers",
+        help="跳过交互式 peer 确认环节（默认会用 LLM 从招股书提取候选并让用户确认）。"
+        "传 --peers 时本标志无效（已显式指定）。",
+    ),
+    recent_ipos: str | None = typer.Option(
+        None,
+        "--recent-ipos",
+        help="近期同行业 IPO 港股代码列表，逗号分隔。用于 sentiment 第三节"
+        "“近期同行业 IPO 暗盘/首日表现”。不传时默认 = peers（同一组）。",
+    ),
+    ifind_target: str | None = typer.Option(
+        None,
+        "--ifind-target",
+        help="目标公司在 iFinD 的真实代码（招股阶段是副牌, 如 H2254 表示珞石）。"
+        "不传时用 --ticker；但招股期间港股代码会被已上市公司复用（如 2670.HK 实际是云迹），"
+        "代码内置公司名校验, 不匹配会自动跳过 target 数据。",
+    ),
 ) -> None:
     """对单个 IPO 项目跑完整深度分析。"""
     _setup_logging()
@@ -83,12 +108,28 @@ def analyze(
         console.print(f"[yellow]招股书 PDF 不存在: {pdf_arg}，将跳过 RAG[/yellow]")
         pdf_arg = None
 
+    peer_list: list[str] | None = None
+    if peers:
+        peer_list = [p.strip() for p in peers.split(",") if p.strip()]
+        console.print(f"[cyan]可比公司输入: {peer_list}[/cyan]")
+
+    recent_ipos_list: list[str] | None = None
+    if recent_ipos:
+        recent_ipos_list = [p.strip() for p in recent_ipos.split(",") if p.strip()]
+        console.print(f"[cyan]近期 IPO 队列: {recent_ipos_list}[/cyan]")
+
+    callback = None if (peer_list or no_confirm_peers) else _interactive_peer_confirm
+
     workflow = CornerstoneWorkflow(debate_max_rounds=debate_rounds)
     ctx = workflow.run(
         ticker=ticker,
         company_name=name,
         industry=industry,
         prospectus_pdf=pdf_arg,
+        peers=peer_list,
+        peer_confirm_callback=callback,
+        recent_ipos=recent_ipos_list,
+        ifind_target=ifind_target,
     )
 
     final_path = write_final_summary(ctx)
@@ -98,6 +139,50 @@ def analyze(
     if decision:
         console.print("\n[bold]核心决议:[/bold]")
         console.print(decision)
+
+
+def _interactive_peer_confirm(candidates: list) -> list[str]:
+    """命令行交互: 展示 LLM 候选 peers, 让用户确认/编辑。
+
+    Args:
+        candidates: list[PeerCandidate] (含 ticker/name/reason)
+
+    Returns: 5 位 ticker 字符串列表; 空列表 = 不用 peer。
+    """
+    from rich.table import Table
+
+    if not candidates:
+        console.print("[yellow]LLM 未从招股书提取到可比 peers, 你可以手工输入或跳过。[/yellow]")
+        ans = typer.prompt(
+            "输入要用的港股代码 (逗号分隔, 如 '02432,01021'); 直接回车=不用 peer",
+            default="",
+            show_default=False,
+        )
+    else:
+        table = Table(title="LLM 从招股书提取的可比公司候选")
+        table.add_column("#", style="cyan", no_wrap=True)
+        table.add_column("代码", style="green")
+        table.add_column("简称")
+        table.add_column("理由")
+        for i, c in enumerate(candidates, 1):
+            table.add_row(str(i), c.ticker, c.name, c.reason)
+        console.print(table)
+        console.print(
+            "[bold]操作:[/bold] 直接回车=采用全部 / 输入逗号分隔代码=替换 / "
+            "输入 [italic]'+02432,01021'[/italic]=追加 / 输入 [italic]'skip'[/italic]=不用 peer"
+        )
+        default_csv = ",".join(c.ticker for c in candidates)
+        ans = typer.prompt("你的选择", default=default_csv, show_default=False)
+    ans = ans.strip()
+    if ans.lower() == "skip" or ans == "":
+        return []
+    if ans.startswith("+"):
+        # 追加
+        existing = [c.ticker for c in candidates]
+        adds = [s.strip() for s in ans[1:].split(",") if s.strip()]
+        return existing + [a for a in adds if a not in existing]
+    # 替换
+    return [s.strip() for s in ans.split(",") if s.strip()]
 
 
 def _try_default_pdf(ticker: str) -> Path | None:

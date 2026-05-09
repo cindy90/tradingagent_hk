@@ -175,6 +175,16 @@ class _OpenAICompatProvider:
         )
         choice = resp.choices[0]
         text = choice.message.content or ""
+        # Thinking 模型（kimi-k2-thinking、deepseek-reasoner 等）把推理输出放在
+        # reasoning_content 字段，content 可能为空。回退避免下游拿到空字符串。
+        if not text:
+            reasoning = getattr(choice.message, "reasoning_content", None) or ""
+            if reasoning:
+                logger.warning(
+                    f"model={model} message.content 为空，回退到 reasoning_content "
+                    f"(len={len(reasoning)})"
+                )
+                text = reasoning
         usage = resp.usage
         # DeepSeek 在 usage 里有 prompt_cache_hit_tokens / prompt_cache_miss_tokens
         cache_read = 0

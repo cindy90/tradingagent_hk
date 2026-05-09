@@ -13,7 +13,118 @@ SYSTEM = """你是港股二级市场情绪分析师。基于近期市场表现�
 ## 四、市场关注度迹象（媒体覆盖、分析师跟踪）
 ## 五、对本次基石认购的情绪面判断（顺风/逆风）
 
-输出 1000-1500 字。如缺乏数据，明确指出数据缺口。"""
+输出 1000-1500 字。如缺乏数据，明确指出数据缺口。
+
+【关键约束 — 严禁幻觉】
+- 你**没有**联网搜索能力，训练知识截止时间早于本次分析时点。
+- 涉及具体股票代码、招股价、上市日期、近期涨跌幅、首日涨跌幅、暗盘价等定量信息，
+  必须**严格来自下方"可比公司近期行情"和"近期同行业 IPO 表现"两个数据块**。
+- 数据块为空 / 未提供时，必须显式写"该指标当前未提供，下文判断为方向性而非定量"，
+  并用方向性词汇（"赛道稀缺""高端制造受关注"）替代具体数字。
+- 禁止凭训练记忆编造："越疆 12 月 IPO 首日破发""黑芝麻 8 月 ..."之类的具体年份+涨跌
+  描述若不在数据块里就**不得出现**。
+- 唯一可凭常识做的判断：板块结构性偏好、北水偏好类型（不带年份与百分比）。
+- **是否破发**的判断必须用数据块的"首日开盘价 vs 招股价":
+  例 越疆 18.8 → 19.7 = +4.8% 未破发; 优必选 90.0 → 89.9 = -0.1% **首日开盘小幅破发**。
+  禁止凭训练记忆说"越疆首日破发"或"优必选大涨"等与数据块矛盾的描述。"""
+
+
+def _render_peers_quotes(rows: list[dict]) -> str:
+    if not rows:
+        return "（未提供可比公司行情数据）"
+    lines = ["| 代码 | 公司 | 最新价 | 最新日期 | 30 日涨跌% | 90 日涨跌% |",
+             "|---|---|---|---|---|---|"]
+    for r in rows:
+        name = r.get("name") or ""
+        lines.append(
+            f"| {r.get('thscode') or r.get('ticker','')} | {name} | "
+            f"{r.get('latest_close','-')} | {r.get('latest_date','-')} | "
+            f"{r.get('return_30d') if r.get('return_30d') is not None else '-'} | "
+            f"{r.get('return_90d') if r.get('return_90d') is not None else '-'} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_peers_info(rows: list[dict]) -> str:
+    """可比公司 IPO 信息: 上市日期 / 招股价 等。"""
+    if not rows:
+        return "（未提供可比公司 IPO 信息）"
+    lines = ["| 代码 | 公司 | 上市日期 | 招股价 | 招股价上限 |",
+             "|---|---|---|---|---|"]
+    for r in rows:
+        lines.append(
+            f"| {r.get('thscode') or r.get('ticker','')} | {r.get('name','')} | "
+            f"{r.get('ipo_date','-')} | {r.get('ipo_price','-')} | {r.get('ipo_max_price','-')} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_southbound_md(macro: dict) -> str:
+    """渲染近期南向资金趋势(全市场, 来自 EDB)。
+
+    用 SOUTHBOUND_NET_HKD_DAILY (港股通日度净买入 HKD) + SOUTHBOUND_CUM_CNY (累计净买入 CNY) 序列, 取最近 7 个交易日 + 简单统计。
+    """
+    if not macro:
+        return "（未提供宏观 EDB 数据；macro_indicators 为空）"
+    daily = macro.get("SOUTHBOUND_NET_HKD_DAILY") or []
+    cum = macro.get("SOUTHBOUND_CUM_CNY") or []
+    if not daily and not cum:
+        return "（macro_indicators 中无南向资金 series）"
+
+    parts: list[str] = []
+    # 近 7 期日度净流入
+    if daily:
+        recent = daily[-7:]
+        if recent:
+            parts.append("**近 7 个交易日南向资金净流入（万港元）**:\n")
+            lines = ["| 日期 | 日度净买入(港币) |", "|---|---|"]
+            for r in recent:
+                lines.append(f"| {r.get('date','-')} | {r.get('value','-')} |")
+            parts.append("\n".join(lines))
+            # 7 日累计 + 趋势
+            try:
+                vals = [float(r.get("value")) for r in recent if r.get("value") is not None]
+                if vals:
+                    avg7 = sum(vals) / len(vals)
+                    last = vals[-1]
+                    parts.append(
+                        f"\n**7 日均值** {avg7:.0f} 万港元 / **最新一日** {last:.0f} 万港元 "
+                        f"({'高于均值' if last > avg7 else '低于均值'})"
+                    )
+            except (TypeError, ValueError):
+                pass
+    # 累计净流入
+    if cum and len(cum) >= 2:
+        latest = cum[-1]
+        thirty_back = cum[-min(30, len(cum))]
+        try:
+            d_30 = float(latest.get("value")) - float(thirty_back.get("value"))
+            parts.append(
+                f"\n**港股通累计净流入(CNY)** 最新 {latest.get('date')} = {latest.get('value')}; "
+                f"近 30 期变动 = {d_30:+.0f}"
+            )
+        except (TypeError, ValueError):
+            pass
+    return "\n".join(parts)
+
+
+def _render_recent_ipos(rows: list[dict]) -> str:
+    """近期同行业 IPO 表: 招股价 / 首日开盘价 / 首日开盘涨跌。"""
+    if not rows:
+        return "（未提供近期同行业 IPO 数据）"
+    lines = ["| 代码 | 公司 | 上市日期 | 招股价 | 招股价上限 | 首日开盘价 | 首日开盘涨跌% |",
+             "|---|---|---|---|---|---|---|"]
+    for r in rows:
+        fdo = r.get("first_day_open")
+        fdor = r.get("first_day_open_return")
+        lines.append(
+            f"| {r.get('thscode') or r.get('ticker','')} | {r.get('name','')} | "
+            f"{r.get('ipo_date','-')} | {r.get('ipo_price','-')} | "
+            f"{r.get('ipo_max_price','-')} | "
+            f"{fdo if fdo is not None else '-'} | "
+            f"{('+' + str(fdor)) if (fdor is not None and fdor >= 0) else (str(fdor) if fdor is not None else '-')} |"
+        )
+    return "\n".join(lines)
 
 
 class SentimentAgent(TemplateAgent):
@@ -24,11 +135,16 @@ class SentimentAgent(TemplateAgent):
     score_card_class = SentimentScoreCard
 
     def build_user_message(self, ctx: AgentContext) -> str:
-        peers_quotes = ctx.extras.peer_recent_quotes
-        recent_ipos = ctx.extras.recent_hk_ipos
+        peers_quotes_md = _render_peers_quotes(ctx.extras.peer_recent_quotes)
+        peers_info_md = _render_peers_info(ctx.extras.peers)
+        recent_ipos_md = _render_recent_ipos(ctx.extras.recent_hk_ipos)
+        southbound_md = _render_southbound_md(ctx.extras.macro_indicators)
         return (
             f"# 项目\n{ctx.company_name} ({ctx.ticker})  行业: {ctx.industry}\n\n"
-            f"# 可比公司近期行情\n{peers_quotes}\n\n"
-            f"# 近期同行业 IPO 表现\n{recent_ipos}\n\n"
-            f"请输出情绪分析。"
+            f"# 可比公司 IPO 信息（来自 iFinD THS_BD）\n{peers_info_md}\n\n"
+            f"# 可比公司近期行情（来自 iFinD THS_HQ，最新交易日数据）\n{peers_quotes_md}\n\n"
+            f"# 近期同行业 IPO 表现\n{recent_ipos_md}\n\n"
+            f"# 港股通南向资金（来自 iFinD EDB, 全市场口径）\n{southbound_md}\n\n"
+            f"请输出情绪分析。第一节'板块近期情绪'必须引用上方南向资金数据"
+            f"（如近 7 日净流入趋势 / 7 日均值 vs 最新一日对比 / 累计净流入变动）, 不要写'未提供'。"
         )

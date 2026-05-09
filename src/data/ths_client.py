@@ -63,15 +63,34 @@ DEFAULT_BASIC_DATA_INDICATORS_HK = [
     "ths_office_addr_stock",             # 办公地址
 ]
 
-# 港股市场宏观与流动性相关 EDB 指标（示例代码，需对照 iFinD EDB 实际编码）
-DEFAULT_HK_MACRO_EDB_CODES = {
-    "HIBOR_1M": "M002820027",       # 1 个月港元 HIBOR
-    "HIBOR_3M": "M002820028",       # 3 个月港元 HIBOR
-    "USD_HKD": "M002824001",        # 美元/港元汇率
-    "HSI_PE": "M002820055",         # 恒指 PE
-    "HK_IPO_AMOUNT": "M002930200",  # 港股 IPO 月度集资额（示例）
-    "CN_CPI_YOY": "M001620256",     # 内地 CPI 同比
-    "CN_PMI": "M001620251",         # 内地 PMI
+# 港股市场宏观与流动性相关 EDB 指标编码。
+#
+# ⚠️ 真实编码必须从 iFinD 客户端"超级命令"工具按指标名搜索得到（quantapi 文档无公开字典）。
+# 旧版本这里写的 M00xxxx 全是占位符（M001620251 实测返回的是"GDP:第二产业:建筑业"），
+# 会让 macro agent 误以为有数据，然后 LLM 凭训练知识幻觉出 2024 年数字。
+#
+# 真实编码格式是 L00xxxxxx（不是 M00xxxxxx），从 iFinD 超级命令工具粘贴的 THS_EDB('L001619084;...')
+# 里提取分号前后的编码即可。
+#
+# 待补全（从 iFinD 客户端超级命令搜以下关键词）：
+#   "HIBOR_3M":            搜 "HIBOR 3 个月" / "HIBOR3M"
+#   "USD_HKD":             搜 "美元兑港币" / "USDHKD"
+#   "HSI_PE":              搜 "恒生指数 市盈率 TTM"
+#   "HK_IPO_AMOUNT":       搜 "香港 IPO 集资额" 或 "新股 集资"
+#   "SOUTHBOUND_NET_FLOW": 搜 "港股通 累计净买入" / "南向资金"
+#   "CN_PMI":              搜 "中国 制造业 PMI"
+# 真实编码（已通过 iFinD QuantAPI 实测验证 index_name 与数据返回）
+DEFAULT_HK_MACRO_EDB_CODES: dict[str, str] = {
+    "HIBOR_1M":                 "L001619084",  # 1 个月港元 HIBOR
+    "HIBOR_3M":                 "L001619085",  # 3 个月港元 HIBOR
+    "HSI_LEVEL":                "G002856503",  # 恒生指数点位（日频）
+    "HSI_PE_TTM":               "G020673147",  # 中国香港:市盈率:恒生指数
+    "HK_IPO_RAISED_MONTHLY":    "G002701953",  # 募集资金:IPO:新发行股份:香港联交所（月频，亿港元）
+    "SOUTHBOUND_NET_HKD_DAILY": "S006015793",  # 港股通:净买入额（HKD，日频）
+    "SOUTHBOUND_CUM_CNY":       "S006015794",  # 港股通:累计净买入额（CNY）
+    "USD_HKD_FWD_ON":           "L035711198",  # USD/HKD 外汇远期曲线 ON
+    "USD_HKD_SWAP_1Y":          "M021799523",  # USD/HKD 外汇掉期曲线 1Y
+    "CN_PMI":                   "M002043802",  # 中国制造业 PMI（月频）
 }
 
 
@@ -153,14 +172,34 @@ def _parse_edb_payload(
 
     if isinstance(rows, list):
         for r in rows:
-            code = r.get("indicator") or r.get("INDICATOR") or r.get("indicode")
+            # iFinD 真实返回每个 table 自身就是一个 series:
+            #   {"id": ["L001619084"], "time": [...], "value": [...]}
+            # id 是 list（取首项），time/value 是平行数组（按时间序对齐）。
+            ids = r.get("id") or r.get("indicator") or r.get("INDICATOR") or r.get("indicode")
+            if isinstance(ids, list):
+                code = ids[0] if ids else None
+            else:
+                code = ids
             alias = code_to_alias.get(code, code) if code else None
             if alias is None:
                 continue
-            out.setdefault(alias, []).append({
-                "date": r.get("time") or r.get("date") or r.get("TIME"),
-                "value": r.get("value") or r.get("VALUE"),
-            })
+            times = r.get("time") or r.get("date") or r.get("TIME") or []
+            values = r.get("value") or r.get("VALUE") or []
+            if isinstance(times, list) and isinstance(values, list):
+                # 数组 series 形式（iFinD 标准）
+                out.setdefault(alias, []).extend(
+                    {"date": d, "value": v}
+                    for d, v in zip(times, values)
+                    if v is not None and v != ""
+                )
+            else:
+                # 兜底：旧式 {time: scalar, value: scalar}
+                if values:
+                    out.setdefault(alias, []).append({"date": times, "value": values})
+
+    # iFinD 返回是降序（最新在前），统一排成升序便于 caller 用 series[-1] 拿最新。
+    for alias_key in out:
+        out[alias_key].sort(key=lambda x: str(x.get("date") or ""))
     return out
 
 

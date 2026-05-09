@@ -17,8 +17,15 @@ from src.feedback.models import ProspectusScoreCard
 from src.llm import ModelTier
 
 # 显式定义的检索主题。新增主题就加一行，不要让 LLM 自己发散查询。
+# 设计原则: 既覆盖通用尽调维度 (business/financial/risk), 也召回"公司故事"相关
+# 特定证据 (产品矩阵/第二增长曲线/AI 战略/出海), 防止 LLM 把上市核心叙事一笔带过。
 RETRIEVAL_TOPICS: list[tuple[str, str]] = [
     ("business_model", "公司主营业务、收入结构、商业模式、客户构成"),
+    ("product_lines", "产品矩阵、产品分类、收入构成、按产品线收入拆分、SKU"),
+    ("growth_curve", "未来发展战略、第二增长曲线、新产品方向、增长驱动力、未来 3-5 年规划"),
+    ("ai_embodied_intelligence",
+     "具身智能 具身机械臂 AI 大模型 VLA 人形机器人 通用机器人 智能体"),
+    ("overseas_strategy", "海外业务、全球化、出海、海外客户、海外收入占比、跨境业务"),
     ("competitive_advantage", "核心竞争力、技术壁垒、护城河、市场地位"),
     ("financial_performance", "近三年营收、毛利、净利润、现金流、关键财务指标"),
     ("risk_factors", "主要风险因素、监管风险、客户集中、供应链风险"),
@@ -33,25 +40,53 @@ ANALYST_SYSTEM = """你是一名专门负责港股 IPO 基石投资尽调的资�
 
 你将收到：
 - 公司基本信息
-- 从招股书 RAG 中检索到的相关段落（已按主题分组，每段附页码）
+- 从招股书 RAG 中检索到的相关段落（已按主题分组，每段附页码），主题包括 product_lines /
+  growth_curve / ai_embodied_intelligence / overseas_strategy 等"上市叙事"相关分类
 
-输出要求：一份完整的招股书深度分析报告（Markdown），按以下章节组织：
+输出要求：一份完整的招股书深度分析报告（Markdown），按以下 10 章组织：
 
-## 一、业务模式与收入结构
-## 二、核心竞争力与护城河
-## 三、财务表现与质量
-## 四、风险因素剖析
-## 五、募集资金用途分析
-## 六、基石投资条款解读
-## 七、股权结构与管理层
-## 八、关连交易与潜在问题
-## 九、综合判断（5 项打分：业务、财务、风险、估值锚定基础、基石条款）
+## 一、业务模式与收入结构（基本盘）
+## 二、产品矩阵与增长曲线（基本盘 + 第二曲线 + 上市叙事）⭐
+## 三、核心竞争力与护城河
+## 四、财务表现与质量
+## 五、风险因素剖析
+## 六、募集资金用途分析
+## 七、基石投资条款解读
+## 八、股权结构与管理层
+## 九、关连交易与潜在问题
+## 十、综合判断（5 项打分：业务、财务、风险、估值锚定基础、基石条款）
+
+【关键章节强制要求 — 第二章 "产品矩阵与增长曲线"】
+
+这是港股 IPO 估值溢价的核心来源, 投行路演故事的灵魂。**必须深度展开**:
+
+1. **产品矩阵拆解（基本盘）**: 按招股书披露的产品线分组（如硬件本体/软件平台/解决方案/服务），
+   引用各产品线收入占比、毛利率差异、客户结构差异。如招股书有"按产品类别收入分类表"必须引用。
+
+2. **第二增长曲线识别（重点！）**:
+   - 检查招股书是否反复强调某个**新产品方向 / 新业务条线 / 新技术叙事**（如"具身智能/具身机械臂/
+     AI/人形机器人/大模型 VLA"等关键词在招股书中频繁出现, 或募集资金有专项分配）。
+   - **如果识别到, 必须独立成 1-2 段**展开:
+     * 该方向的产品形态 / 商业化进度 / 竞品定位
+     * 它在招股书中的地位（路演故事核心 / 募资专项 / 研发战略）
+     * 对估值的潜在贡献（赛道空间 / 倍数溢价路径 / 实现概率）
+   - **禁止把第二曲线一笔带过**或仅作为竞争力的一句子提及。
+
+3. **上市叙事提炼**: 用 1-2 句话提炼公司路演的核心故事
+   （例: "工业 + 协作机器人基本盘 + 具身机械臂第二曲线"）。
+
+4. **海外/出海角度**（如有）: 海外收入占比变化, 全球化战略实质性进展。
 
 写作要求：
 - 每个关键论断后用 `(招股书 P.页码)` 标注证据；
-- 数字必须直接引用招股书原文，不要猜；
-- 章节九给出 1-5 分打分（5 最高）和打分理由；
-- 总长 1500-2500 字，不要堆砌套话。"""
+- 数字必须直接引用招股书原文, 不要猜；
+- 第十章给出 1-5 分打分（5 最高）和打分理由；
+- 总长 2500-3500 字（增加叙事章节后允许更长）, 但禁止堆砌套话。
+
+【严禁偷懒】
+- 第二章如果空泛或回避（"产品覆盖广泛""战略协同"等套话）= 报告失败。
+- 即使招股书没有完整的第二曲线披露, 也必须显式说"招股书未独立披露 X 业务条线收入占比, 以下为
+  基于募集资金用途/研发战略章节的间接推断"——保留诚实标记, 但不要回避问题。"""
 
 
 class ProspectusAnalystAgent(BaseAgent):
@@ -69,14 +104,15 @@ class ProspectusAnalystAgent(BaseAgent):
         if ctx.rag is None or not ctx.rag.is_indexed():
             return "（招股书 RAG 索引不可用，请检查 PDF 是否已加载）"
 
-        from config import get_settings
-        k = get_settings().rag_top_k
+        # 主题数从 8 增到 12 后, 单主题召回数下调到 4 (原默认 6), 控制总 token。
+        # 总 chunks: 12 * 4 = 48 (与原 8 * 6 = 48 持平), 单 chunk 截断到 1000 字进一步压缩。
+        k = 4
         blocks: list[str] = []
         for topic_key, topic_query in RETRIEVAL_TOPICS:
             text_hits = ctx.rag.search(topic_query, k=k, type_filter="text")
             table_hits: list[dict] = []
-            # 财务/可比/募资类主题额外取表格
-            if topic_key in ("financial_performance", "use_of_proceeds"):
+            # 财务/募资类主题额外取表格
+            if topic_key in ("financial_performance", "use_of_proceeds", "product_lines"):
                 table_hits = ctx.rag.search(topic_query, k=2, type_filter="table")
             hits = text_hits + table_hits
             if not hits:
@@ -87,7 +123,7 @@ class ProspectusAnalystAgent(BaseAgent):
                 blocks.append(
                     f"[招股书 P.{h['page_start']}-{h['page_end']} | "
                     f"{h['section'] or '无章节标题'} {tag}]\n"
-                    f"{h['text'][:1500]}"
+                    f"{h['text'][:1000]}"
                 )
         return "\n\n".join(blocks)
 
@@ -116,7 +152,7 @@ class ProspectusAnalystAgent(BaseAgent):
             system=system,
             messages=[{"role": "user", "content": user_msg}],
             cached_system_blocks=ctx.cached_blocks or None,
-            max_tokens=6500,
+            max_tokens=5000,
             temperature=0.2,
         )
         raw = resp.text

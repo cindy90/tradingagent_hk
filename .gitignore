@@ -25,4 +25,5 @@ chroma_db/
 
 .idea/
 .vscode/
+.claude/
 .DS_Store

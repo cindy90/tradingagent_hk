@@ -98,6 +98,228 @@ def select_cached_blocks(
     return selected
 
 
+def _enrich_peer_with_valuation(peer: dict, year: int = 2025) -> None:
+    """给 peer dict 补 PE/PS/PB/EV-EBITDA/EV-Sales + 营收/净利/毛利率等。原地修改。"""
+    from src.data.ifind_sdk import get_peer_valuation_multiples, get_peer_fundamentals
+
+    ticker = peer["ticker"]
+    try:
+        peer.update({
+            k: v for k, v in get_peer_valuation_multiples(ticker).items()
+            if k not in ("ticker", "thscode")
+        })
+    except Exception as e:
+        logger.warning(f"[Prefetch SDK] {ticker} 估值倍数失败: {e}")
+    try:
+        peer.update({
+            k: v for k, v in get_peer_fundamentals(ticker, year=year).items()
+            if k not in ("ticker", "thscode")
+        })
+    except Exception as e:
+        logger.warning(f"[Prefetch SDK] {ticker} 基本面失败: {e}")
+
+
+def _prefetch_ifind_sdk(
+    peers: list[str],
+    recent_ipos: list[str] | None = None,
+    target_ticker: str | None = None,
+    expected_target_name: str | None = None,
+) -> dict[str, Any]:
+    """用 iFinD SDK 拉可比公司近期 K 线 + IPO 信息（含首日开盘价）。
+
+    Args:
+        peers: 估值可比清单（业务直接相似, 2-4 家）。
+        recent_ipos: 近期同行业 IPO 队列（5-10 家, 反映打新情绪）。
+            未给时默认 = peers（让 sentiment 至少有一份"近期 IPO 首日表现"数据）。
+
+    返回:
+      {
+        "peers": [{ticker, thscode, name, ipo_date, ipo_price, ipo_max_price,
+                   first_day_open, first_day_open_return}, ...],
+        "peer_recent_quotes": [{ticker, thscode, latest_close, latest_date,
+                                 return_30d, return_90d}, ...],
+        "recent_hk_ipos": [...同 peers 结构, 但范围可能更广...]
+      }
+    SDK 不可用 / 登录失败时返回空 list 字段。
+    """
+    from datetime import date, timedelta
+
+    from src.data.ifind_sdk import compute_peer_quote_summary, get_peer_ipo_summary
+
+    today = date.today()
+    sdate = (today - timedelta(days=140)).strftime("%Y-%m-%d")  # 多取日历日 → 保 90 交易日
+    edate = today.strftime("%Y-%m-%d")
+
+    def _ipo_for(ticker: str) -> dict | None:
+        try:
+            return get_peer_ipo_summary(ticker)
+        except Exception as e:
+            logger.warning(f"[Prefetch SDK] {ticker} IPO 信息失败: {e}")
+            return None
+
+    # peers: 估值可比 → 同时拉 K 线 + 估值倍数 + 财务基本面
+    peers_info: list[dict] = []
+    quotes: list[dict] = []
+    for ticker in peers:
+        ipo = _ipo_for(ticker)
+        if ipo is None:
+            continue
+        try:
+            quote = compute_peer_quote_summary(ticker, sdate, edate)
+        except Exception as e:
+            logger.warning(f"[Prefetch SDK] {ticker} K 线失败: {e}")
+            quote = {"ticker": ticker, "thscode": ipo.get("thscode")}
+        _enrich_peer_with_valuation(ipo)
+        peers_info.append(ipo)
+        quotes.append(quote)
+        logger.info(
+            f"[Prefetch SDK] peer {ticker} ({ipo.get('name')}): "
+            f"close={quote.get('latest_close')} PS={ipo.get('ps_ttm')} "
+            f"PB={ipo.get('pb_latest')} 营收={ipo.get('revenue')} "
+            f"first_day_open_return={ipo.get('first_day_open_return')}%"
+        )
+
+    # recent_hk_ipos: 默认 = peers, 用户提供时合并(按 ticker 去重)
+    ipo_cohort_tickers = list(peers)
+    if recent_ipos:
+        for t in recent_ipos:
+            if t not in ipo_cohort_tickers:
+                ipo_cohort_tickers.append(t)
+
+    if recent_ipos:
+        # 仅为新增的拉 IPO summary, peers 部分复用上面的
+        existing_by_ticker = {p["ticker"]: p for p in peers_info}
+        recent_ipos_info: list[dict] = []
+        for ticker in ipo_cohort_tickers:
+            if ticker in existing_by_ticker:
+                recent_ipos_info.append(existing_by_ticker[ticker])
+            else:
+                ipo = _ipo_for(ticker)
+                if ipo is None:
+                    continue
+                recent_ipos_info.append(ipo)
+                logger.info(
+                    f"[Prefetch SDK] recent_ipo {ticker} ({ipo.get('name')}): "
+                    f"ipo_date={ipo.get('ipo_date')} ipo_price={ipo.get('ipo_price')} "
+                    f"first_day_open={ipo.get('first_day_open')}"
+                )
+    else:
+        # 未额外提供, recent_hk_ipos = peers (引用同一组数据)
+        recent_ipos_info = peers_info
+
+    # 同时拉 target 公司（招股股票本身）的估值倍数 + 财务
+    # 注意: 招股阶段的港股 ticker 在 iFinD 可能被复用（例如 2670.HK 实际是云迹）。
+    # caller 应传 ifind 真实代码（如 H2254 副牌），并配合 expected_target_name 做校验。
+    target_data: dict | None = None
+    if target_ticker:
+        try:
+            from src.data.ifind_sdk import to_ths_hk_code, verify_company_name
+            thscode = to_ths_hk_code(target_ticker)
+            if expected_target_name:
+                matched, actual_name = verify_company_name(thscode, expected_target_name)
+                if not matched:
+                    logger.error(
+                        f"[Prefetch SDK] ⚠️ target ticker {target_ticker} 在 iFinD 实际是"
+                        f"'{actual_name}', 与 '{expected_target_name}' 不匹配; "
+                        f"target 数据可能被错误公司污染, 已跳过 target_valuation。"
+                        f"如该项目在 IPO 询价阶段, 请用 --ifind-target 显式指定副牌代码 (如 H2254)。"
+                    )
+                    target_data = None
+                    raise RuntimeError("ticker name mismatch")
+                logger.info(f"[Prefetch SDK] target {thscode} 公司名校验通过: {actual_name}")
+            target_data = {"ticker": target_ticker, "thscode": thscode}
+            _enrich_peer_with_valuation(target_data)
+            logger.info(
+                f"[Prefetch SDK] target {thscode}: PS={target_data.get('ps_ttm')} "
+                f"PB={target_data.get('pb_latest')} 营收={target_data.get('revenue')} "
+                f"净利={target_data.get('net_profit')}"
+            )
+        except Exception as e:
+            logger.warning(f"[Prefetch SDK] target {target_ticker} 估值/财务失败: {e}")
+            target_data = None
+
+    return {
+        "peers": peers_info,
+        "peer_recent_quotes": quotes,
+        "recent_hk_ipos": recent_ipos_info,
+        "target_valuation": target_data,
+    }
+
+
+def persist_prediction(ctx: AgentContext, llm: LLMClient) -> int | None:
+    """把 ctx 里的决议结果落到 feedback DB，返回 prediction id。
+
+    决议缺失时返回 None。可被 Workflow 主流程或一次性脚本（rerun_decision）共用。
+    """
+    from datetime import datetime as _dt
+
+    from src.feedback import FeedbackStore
+    from src.feedback.models import Prediction
+    from src.llm.pricing import estimate_total_cost_cny
+    from src.llm.router import ModelTier, resolve_model
+
+    decision = ctx.extras.decision_json
+    if not decision:
+        logger.info("决议 JSON 缺失，跳过 prediction 落库")
+        return None
+
+    amount = decision.get("suggested_amount_usd_million") or [0, 0]
+    valuation = decision.get("valuation_range_hkd_billion") or {}
+
+    agg = llm.ledger.by_tier
+    total_in = sum(s.get("input", 0) for s in agg.values())
+    total_out = sum(s.get("output", 0) for s in agg.values())
+    total_cache = sum(s.get("cache_read", 0) for s in agg.values())
+    tier_to_model = {t.value: resolve_model(t) for t in ModelTier}
+
+    s = get_settings()
+
+    score_cards = ctx.extras.misc.get("score_cards", {})
+    features_used = ["scoring_card"]
+    cog_features = ctx.extras.misc.get("cogalpha_features")
+    if cog_features:
+        features_used.extend(sorted(cog_features))
+
+    p = Prediction(
+        project_id=ctx.project_id,
+        ticker=ctx.ticker,
+        company_name=ctx.company_name,
+        industry=ctx.industry,
+        decision_date=_dt.now(),
+        recommendation=str(decision.get("recommendation", "")),
+        confidence=str(decision.get("confidence", "")),
+        valuation_low=valuation.get("low"),
+        valuation_mid=float(valuation.get("mid", 0) or 0),
+        valuation_high=valuation.get("high"),
+        anchor_method=str(valuation.get("anchor_method", "")),
+        anchor_logic=str(valuation.get("anchor_logic", "")),
+        ipo_pricing_view=str(decision.get("ipo_pricing_view", "")),
+        suggested_amount_low_usd_m=float(amount[0]) if len(amount) > 0 else 0,
+        suggested_amount_high_usd_m=float(amount[1]) if len(amount) > 1 else 0,
+        key_supports=list(decision.get("key_supports", [])),
+        key_risks=list(decision.get("key_risks", [])),
+        deal_conditions=list(decision.get("deal_conditions", [])),
+        monitoring_kpis=list(decision.get("monitoring_kpis", [])),
+        agent_score_cards=score_cards,
+        model_provider=s.llm_provider,
+        model_tier_models=tier_to_model,
+        total_input_tokens=total_in,
+        total_output_tokens=total_out,
+        total_cache_read_tokens=total_cache,
+        estimated_cost_cny=estimate_total_cost_cny(agg, tier_to_model),
+        cogalpha_features_used=features_used,
+        reports_dir_path=str(ctx.reports_dir),
+        status="open",
+    )
+    store = FeedbackStore()
+    try:
+        pid = store.save_prediction(p)
+        logger.info(f"prediction 已落库 id={pid}")
+        return pid
+    finally:
+        store.close()
+
+
 class CornerstoneWorkflow:
     def __init__(self, llm: LLMClient | None = None, debate_max_rounds: int | None = None):
         self.llm = llm or LLMClient()
@@ -209,11 +431,49 @@ class CornerstoneWorkflow:
         prospectus_pdf: str | Path | None = None,
         extras: dict | None = None,
         use_case_rag: bool = True,
+        peers: list[str] | None = None,
+        peer_confirm_callback: Any = None,
+        recent_ipos: list[str] | None = None,
+        ifind_target: str | None = None,
     ) -> AgentContext:
+        # 1. 基础 prefetch (不依赖 peers)
         prefetched = self._prefetch_ths(ticker, industry)
         wf_extras = WorkflowExtras.from_dict({**(extras or {}), **prefetched})
 
+        # 2. 建 ctx (含 RAG); peers 数据先空, 之后注入
         ctx = self._build_ctx(ticker, company_name, industry, prospectus_pdf, wf_extras)
+
+        # 3. 交互式 peer 确认 (仅当未给 peers 且 callback 存在 且 RAG 可用)
+        if not peers and peer_confirm_callback is not None and ctx.rag is not None:
+            try:
+                from src.agents.peer_suggester import suggest_peers
+                candidates = suggest_peers(
+                    ctx.rag, ctx.company_name, ctx.industry, self.llm
+                )
+                logger.info(f"[PeerSuggester] LLM 候选 {len(candidates)} 个")
+                peers = peer_confirm_callback(candidates) or None
+            except Exception as e:
+                logger.warning(f"[PeerSuggester] 失败, 跳过交互确认: {e}")
+
+        # 4. 用确认后的 peers + recent_ipos 拉 SDK 数据, setattr 到 ctx.extras
+        # ifind_target 优先级: 显式传入 > project ticker(2670). 校验公司名防止代码污染。
+        target_for_ifind = ifind_target or ticker
+        if peers or recent_ipos:
+            sdk_data = _prefetch_ifind_sdk(
+                peers or [], recent_ipos,
+                target_ticker=target_for_ifind,
+                expected_target_name=company_name,
+            )
+            ctx.extras.peers = sdk_data["peers"]
+            ctx.extras.peer_recent_quotes = sdk_data["peer_recent_quotes"]
+            ctx.extras.recent_hk_ipos = sdk_data["recent_hk_ipos"]
+            ctx.extras.target_valuation = sdk_data.get("target_valuation")
+            # 同步 target 营收/净利到既有字段, 让 comparable_valuation 工具能用
+            tv = sdk_data.get("target_valuation") or {}
+            if tv.get("revenue"):
+                ctx.extras.target_revenue = float(tv["revenue"])
+            if tv.get("net_profit"):
+                ctx.extras.target_net_profit = float(tv["net_profit"])
 
         # 闭环关键 (Phase C): 检索历史相似案例，注入到 cached_blocks
         if use_case_rag:
@@ -312,71 +572,4 @@ class CornerstoneWorkflow:
         )
 
     def _persist_prediction(self, ctx: AgentContext) -> None:
-        """把决议结果落到 feedback DB。决议缺失时跳过。"""
-        from datetime import datetime as _dt
-
-        from src.feedback import FeedbackStore
-        from src.feedback.models import Prediction
-        from src.llm.pricing import estimate_total_cost_cny
-        from src.llm.router import ModelTier, resolve_model
-
-        decision = ctx.extras.decision_json
-        if not decision:
-            logger.info("决议 JSON 缺失，跳过 prediction 落库")
-            return
-
-        amount = decision.get("suggested_amount_usd_million") or [0, 0]
-        valuation = decision.get("valuation_range_hkd_billion") or {}
-
-        agg = self.llm.ledger.by_tier
-        total_in = sum(s.get("input", 0) for s in agg.values())
-        total_out = sum(s.get("output", 0) for s in agg.values())
-        total_cache = sum(s.get("cache_read", 0) for s in agg.values())
-        tier_to_model = {t.value: resolve_model(t) for t in ModelTier}
-
-        from config import get_settings
-        s = get_settings()
-
-        score_cards = ctx.extras.misc.get("score_cards", {})
-        features_used = ["scoring_card"]
-        cog_features = ctx.extras.misc.get("cogalpha_features")
-        if cog_features:
-            features_used.extend(sorted(cog_features))
-
-        p = Prediction(
-            project_id=ctx.project_id,
-            ticker=ctx.ticker,
-            company_name=ctx.company_name,
-            industry=ctx.industry,
-            decision_date=_dt.now(),
-            recommendation=str(decision.get("recommendation", "")),
-            confidence=str(decision.get("confidence", "")),
-            valuation_low=valuation.get("low"),
-            valuation_mid=float(valuation.get("mid", 0) or 0),
-            valuation_high=valuation.get("high"),
-            anchor_method=str(valuation.get("anchor_method", "")),
-            anchor_logic=str(valuation.get("anchor_logic", "")),
-            ipo_pricing_view=str(decision.get("ipo_pricing_view", "")),
-            suggested_amount_low_usd_m=float(amount[0]) if len(amount) > 0 else 0,
-            suggested_amount_high_usd_m=float(amount[1]) if len(amount) > 1 else 0,
-            key_supports=list(decision.get("key_supports", [])),
-            key_risks=list(decision.get("key_risks", [])),
-            deal_conditions=list(decision.get("deal_conditions", [])),
-            monitoring_kpis=list(decision.get("monitoring_kpis", [])),
-            agent_score_cards=score_cards,
-            model_provider=s.llm_provider,
-            model_tier_models=tier_to_model,
-            total_input_tokens=total_in,
-            total_output_tokens=total_out,
-            total_cache_read_tokens=total_cache,
-            estimated_cost_cny=estimate_total_cost_cny(agg, tier_to_model),
-            cogalpha_features_used=features_used,
-            reports_dir_path=str(ctx.reports_dir),
-            status="open",
-        )
-        store = FeedbackStore()
-        try:
-            pid = store.save_prediction(p)
-            logger.info(f"prediction 已落库 id={pid}")
-        finally:
-            store.close()
+        persist_prediction(ctx, self.llm)

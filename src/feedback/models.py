@@ -10,10 +10,11 @@ ScoreCard 设计要点:
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ---------- 公共基类 ----------
@@ -27,6 +28,29 @@ class AgentScoreCard(BaseModel):
     confidence: Literal["高", "中", "低"] = "中"
     evidence_pages: list[int] = Field(default_factory=list, description="招股书页码引用")
     notes: str = ""
+
+    @field_validator("evidence_pages", mode="before")
+    @classmethod
+    def _coerce_evidence_pages(cls, v: Any) -> list[int]:
+        # LLM 偶尔会塞章节名（"招股书行业概览章节"）或 "P.42" / "42页" 等字符串。
+        # 严格校验会让整张 score card 作废。这里宽容地抽数字，无数字则丢弃该项。
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            v = [v]
+        out: list[int] = []
+        for item in v:
+            if isinstance(item, bool):
+                continue
+            if isinstance(item, int):
+                out.append(item)
+            elif isinstance(item, float):
+                out.append(int(item))
+            elif isinstance(item, str):
+                m = re.search(r"\d+", item)
+                if m:
+                    out.append(int(m.group()))
+        return out
 
 
 # ---------- 各 Agent 专属评分卡 ----------

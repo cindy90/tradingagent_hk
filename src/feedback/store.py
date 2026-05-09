@@ -160,11 +160,14 @@ class FeedbackStore:
 
     # ---------- predictions ----------
 
-    def save_prediction(self, p: Prediction) -> int:
+    def save_prediction(self, p: Prediction, *, upsert: bool = True) -> int:
+        """落库 prediction. 默认 upsert: 同 project_id 已存在则 UPDATE。
+
+        Args:
+            upsert: True (默认) = 已存在则更新; False = 已存在则跳过。
+        """
         d = p.model_dump()
-        cols = []
-        vals = []
-        placeholders = []
+        cols, vals, placeholders = [], [], []
         for k, v in d.items():
             if k in _JSON_FIELDS_PRED:
                 cols.append(f"{k}_json")
@@ -180,13 +183,24 @@ class FeedbackStore:
             logger.info(f"prediction 落库: id={cur.lastrowid} project={p.project_id}")
             return cur.lastrowid
         except sqlite3.IntegrityError as e:
-            if "UNIQUE constraint failed" in str(e):
+            if "UNIQUE constraint failed" not in str(e):
+                raise
+            existing = self._conn.execute(
+                "SELECT id FROM predictions WHERE project_id=?", (p.project_id,)
+            ).fetchone()
+            existing_id = existing["id"] if existing else -1
+            if not upsert:
                 logger.warning(f"project_id={p.project_id} 已存在，跳过插入")
-                row = self._conn.execute(
-                    "SELECT id FROM predictions WHERE project_id=?", (p.project_id,)
-                ).fetchone()
-                return row["id"] if row else -1
-            raise
+                return existing_id
+            # UPDATE: 不动 id, 其他字段全部覆盖
+            set_clause = ",".join(f"{c}=?" for c in cols)
+            self._conn.execute(
+                f"UPDATE predictions SET {set_clause} WHERE id=?",
+                vals + [existing_id],
+            )
+            self._conn.commit()
+            logger.info(f"prediction 更新: id={existing_id} project={p.project_id}")
+            return existing_id
 
     def get_prediction(self, pred_id: int) -> Prediction | None:
         row = self._conn.execute(
