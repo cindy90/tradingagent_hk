@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -168,6 +169,78 @@ def test_workflow_extras_typed_access() -> None:
     assert ex.get("nonexistent_key", default="dft") == "dft"
     assert ex.get("custom_field") == "hello"
     assert ex.misc["custom_field"] == "hello"
+
+
+def test_estimate_bge_tokens_chinese_dominant() -> None:
+    from src.data.prospectus import estimate_bge_tokens
+
+    # 纯中文：估算 ~= 字符数
+    zh = "本公司主要从事工业机器人研发与制造业务"
+    n = estimate_bge_tokens(zh)
+    assert len(zh) - 3 <= n <= len(zh) + 3
+
+
+def test_estimate_bge_tokens_english_words() -> None:
+    from src.data.prospectus import estimate_bge_tokens
+
+    # 英文：词数 × 1.3 量级
+    en = "Industrial robotics and collaborative arms business"
+    n = estimate_bge_tokens(en)
+    word_count = len(en.split())
+    assert n >= word_count  # 至少不会低于词数
+
+
+def test_split_text_token_aware_respects_target() -> None:
+    from src.data.prospectus import ProspectusLoader, estimate_bge_tokens
+
+    text = "本公司业务概览。" * 200  # 长文本
+    chunks = ProspectusLoader._split_text_token_aware(text, target_tokens=50, overlap_tokens=10)
+    assert len(chunks) > 1
+    for c in chunks:
+        # 允许 20% 弹性（硬切边界）
+        assert estimate_bge_tokens(c) <= 60, f"chunk 超出 token 上限: {estimate_bge_tokens(c)}"
+
+
+def test_split_text_creates_overlap() -> None:
+    from src.data.prospectus import ProspectusLoader
+
+    text = "段A。段B。段C。段D。段E。段F。段G。段H。" * 30
+    chunks = ProspectusLoader._split_text_token_aware(text, target_tokens=30, overlap_tokens=10)
+    if len(chunks) >= 2:
+        # 相邻 chunk 应有重叠（任意一个 atom 共享）
+        a_atoms = set(re.findall(r"段[A-Z]", chunks[0]))
+        b_atoms = set(re.findall(r"段[A-Z]", chunks[1]))
+        assert a_atoms & b_atoms, "相邻 chunk 没有 overlap"
+
+
+def test_table_to_markdown_basic() -> None:
+    from src.data.prospectus import _table_to_markdown
+
+    table = [
+        ["项目", "2022年", "2023年", "2024年"],
+        ["营业收入", "1,000", "1,500", "2,000"],
+        ["净利润", "100", "200", "350"],
+    ]
+    md = _table_to_markdown(table)
+    assert "| 项目 | 2022年 | 2023年 | 2024年 |" in md
+    assert "| --- | --- | --- | --- |" in md
+    assert "| 营业收入 | 1,000 | 1,500 | 2,000 |" in md
+
+
+def test_is_meaningful_table_filters_empty() -> None:
+    from src.data.prospectus import _is_meaningful_table
+
+    # 太少数据
+    assert _is_meaningful_table([["", ""]]) is False
+    # 1 行
+    assert _is_meaningful_table([["a", "b", "c"]]) is False
+    # 内容稀疏
+    assert _is_meaningful_table([["", "", ""], ["", "", ""]]) is False
+    # 合格
+    assert _is_meaningful_table([
+        ["a", "b", "c"],
+        ["1", "2", "3"],
+    ]) is True
 
 
 def test_select_cached_blocks_picks_key_sections() -> None:

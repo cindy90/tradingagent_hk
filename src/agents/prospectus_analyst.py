@@ -70,13 +70,20 @@ class ProspectusAnalystAgent(BaseAgent):
         k = get_settings().rag_top_k
         blocks: list[str] = []
         for topic_key, topic_query in RETRIEVAL_TOPICS:
-            hits = ctx.rag.search(topic_query, k=k)
+            text_hits = ctx.rag.search(topic_query, k=k, type_filter="text")
+            table_hits: list[dict] = []
+            # 财务/可比/募资类主题额外取表格
+            if topic_key in ("financial_performance", "use_of_proceeds"):
+                table_hits = ctx.rag.search(topic_query, k=2, type_filter="table")
+            hits = text_hits + table_hits
             if not hits:
                 continue
             blocks.append(f"### 主题: {topic_key} ({topic_query})")
             for h in hits:
+                tag = "📊 表格" if h.get("type") == "table" else ""
                 blocks.append(
-                    f"[招股书 P.{h['page_start']}-{h['page_end']} | {h['section'] or '无章节标题'}]\n"
+                    f"[招股书 P.{h['page_start']}-{h['page_end']} | "
+                    f"{h['section'] or '无章节标题'} {tag}]\n"
                     f"{h['text'][:1500]}"
                 )
         return "\n\n".join(blocks)

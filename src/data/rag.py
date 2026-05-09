@@ -87,7 +87,12 @@ class ProspectusRAG:
             ids=[c.chunk_id for c in chunks],
             documents=[c.text for c in chunks],
             metadatas=[
-                {"section": c.section, "page_start": c.page_start, "page_end": c.page_end}
+                {
+                    "section": c.section,
+                    "page_start": c.page_start,
+                    "page_end": c.page_end,
+                    "type": c.metadata.get("type", "text"),
+                }
                 for c in chunks
             ],
         )
@@ -97,17 +102,34 @@ class ProspectusRAG:
         )
         return len(chunks)
 
-    def search(self, query: str, k: int = 6) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        k: int = 6,
+        type_filter: str | None = None,
+    ) -> list[dict]:
+        """RAG 检索。
+
+        type_filter:
+          - None     : 不过滤（默认）
+          - "text"   : 只返回文本块
+          - "table"  : 只返回表格块（用于财务/估值类查询）
+        """
         self._ensure()
         q = (_BGE_QUERY_PREFIX_ZH + query) if self._is_bge_zh() else query
-        res = self._collection.query(query_texts=[q], n_results=k)  # type: ignore[union-attr]
+        kwargs: dict = {"query_texts": [q], "n_results": k}
+        if type_filter:
+            kwargs["where"] = {"type": type_filter}
+        res = self._collection.query(**kwargs)  # type: ignore[union-attr]
         out = []
         for i, doc in enumerate(res["documents"][0]):
+            md = res["metadatas"][0][i]
             out.append({
                 "text": doc,
-                "section": res["metadatas"][0][i].get("section", ""),
-                "page_start": res["metadatas"][0][i].get("page_start", 0),
-                "page_end": res["metadatas"][0][i].get("page_end", 0),
+                "section": md.get("section", ""),
+                "page_start": md.get("page_start", 0),
+                "page_end": md.get("page_end", 0),
+                "type": md.get("type", "text"),
                 "distance": res["distances"][0][i] if "distances" in res else None,
             })
         return out
