@@ -1420,3 +1420,162 @@ def test_final_memo_writer_renders_sensitivity(tmp_path) -> None:
     assert "毛利率" in text
     # 概率被乘了 100
     assert "30%" in text or "30.0%" in text
+
+
+# ============================================================================
+# peer_pool v2 测试 (#1 改进)
+# ============================================================================
+
+def test_derive_keywords_from_industry() -> None:
+    from src.data.peer_pool import derive_keywords_from_industry
+
+    kws = derive_keywords_from_industry("工业机器人/协作机器人")
+    assert "工业机器人" in kws
+    assert "协作机器人" in kws
+
+    kws2 = derive_keywords_from_industry("AI/SaaS")
+    assert "AI" in kws2 or "SaaS" in kws2
+
+    # 空值 / 单字
+    assert derive_keywords_from_industry("") == []
+
+
+def test_filter_by_keywords_matches_any() -> None:
+    from src.data.peer_pool import _filter_by_keywords
+
+    snapshot = [
+        {"ticker": "02432", "name": "越疆-W"},
+        {"ticker": "01021", "name": "华沿机器人"},
+        {"ticker": "00700", "name": "腾讯控股"},
+        {"ticker": "09660", "name": "地平线机器人-W"},
+    ]
+    out = _filter_by_keywords(snapshot, ["机器人"])
+    out_tickers = [r["ticker"] for r in out]
+    assert "01021" in out_tickers
+    assert "09660" in out_tickers
+    assert "00700" not in out_tickers
+    # 越疆-W 不含"机器人"字, 不应匹配
+    assert "02432" not in out_tickers
+    # 多关键词: 命中任一即留
+    out2 = _filter_by_keywords(snapshot, ["越疆", "腾讯"])
+    assert {"02432", "00700"} == set(r["ticker"] for r in out2)
+
+
+def test_filter_by_market_cap_keeps_unknown() -> None:
+    from src.data.peer_pool import _filter_by_market_cap
+
+    rows = [
+        {"ticker": "A", "market_cap_hkd_b": 50.0},
+        {"ticker": "B", "market_cap_hkd_b": 200.0},
+        {"ticker": "C", "market_cap_hkd_b": 500.0},
+        {"ticker": "D", "market_cap_hkd_b": None},  # 未知
+    ]
+    out = _filter_by_market_cap(rows, min_cap_hkd_b=80, max_cap_hkd_b=300)
+    out_tickers = [r["ticker"] for r in out]
+    assert "B" in out_tickers
+    assert "D" in out_tickers  # 未知保留
+    assert "A" not in out_tickers
+    assert "C" not in out_tickers
+
+
+def test_normalize_ticker_pads_to_5() -> None:
+    from src.data.peer_pool import _normalize_ticker
+
+    assert _normalize_ticker("700") == "00700"
+    assert _normalize_ticker("02432") == "02432"
+    assert _normalize_ticker("2432.HK") == "02432"
+    assert _normalize_ticker("2432.hk") == "02432"
+    assert _normalize_ticker(None) is None
+    assert _normalize_ticker("X123") is None
+
+
+def test_peer_suggester_v2_validates_against_pool(monkeypatch) -> None:
+    """v2 必须拒绝 LLM 输出池外的 ticker（防幻觉关键测试）。"""
+    from src.agents.peer_suggester import suggest_peers
+    from src.data.rag import ProspectusRAG
+    from src.llm import LLMClient
+    from src.llm.client import LLMResponse
+
+    pool = [
+        {"ticker": "02432", "name": "越疆-W", "market_cap_hkd_b": 80.0},
+        {"ticker": "01021", "name": "华沿机器人", "market_cap_hkd_b": 50.0},
+    ]
+    # LLM 输出 1 个池内 + 1 个池外（捏造的）
+    LLM_OUT = (
+        "```json\n"
+        '[{"ticker":"02432","name":"越疆","similarity_score":5.0,"reason":"协作机器人"},'
+        '{"ticker":"00700","name":"腾讯","similarity_score":4.5,"reason":"瞎编的"}]\n'
+        "```"
+    )
+
+    class _Mock:
+        def complete(self, **_):
+            return LLMResponse(text=LLM_OUT, input_tokens=10, output_tokens=10, model="x")
+
+    class _MockRAG:
+        def search(self, query, k=8):
+            return [{"text": "竞争对手", "section": "x",
+                     "page_start": 1, "page_end": 1, "distance": 0.1}]
+
+    candidates = suggest_peers(
+        _MockRAG(), "珞石机器人", "工业机器人", LLMClient(provider=_Mock(), provider_name="m"),
+        pool=pool,
+    )
+    # 池外 ticker (00700) 应被过滤
+    tickers = [c.ticker for c in candidates]
+    assert "02432" in tickers
+    assert "00700" not in tickers
+    # market_cap 应从池里补全
+    assert candidates[0].market_cap_hkd_b == 80.0
+
+
+def test_peer_suggester_v2_sorts_by_similarity(monkeypatch) -> None:
+    from src.agents.peer_suggester import suggest_peers
+    from src.llm import LLMClient
+    from src.llm.client import LLMResponse
+
+    pool = [
+        {"ticker": "02432", "name": "A", "market_cap_hkd_b": 50.0},
+        {"ticker": "01021", "name": "B", "market_cap_hkd_b": 50.0},
+        {"ticker": "09660", "name": "C", "market_cap_hkd_b": 50.0},
+    ]
+    # LLM 故意乱序输出
+    LLM_OUT = (
+        "```json\n[\n"
+        '{"ticker":"01021","name":"B","similarity_score":3.5,"reason":"x"},\n'
+        '{"ticker":"09660","name":"C","similarity_score":4.8,"reason":"x"},\n'
+        '{"ticker":"02432","name":"A","similarity_score":4.2,"reason":"x"}\n'
+        "]\n```"
+    )
+
+    class _Mock:
+        def complete(self, **_):
+            return LLMResponse(text=LLM_OUT, input_tokens=10, output_tokens=10, model="x")
+
+    class _MockRAG:
+        def search(self, query, k=8):
+            return [{"text": "x", "section": "", "page_start": 1, "page_end": 1, "distance": 0.1}]
+
+    cands = suggest_peers(_MockRAG(), "x", "y", LLMClient(provider=_Mock(), provider_name="m"), pool=pool)
+    scores = [c.similarity_score for c in cands]
+    # 必须按 similarity_score 降序
+    assert scores == sorted(scores, reverse=True)
+    assert cands[0].ticker == "09660"  # similarity 4.8 最高
+
+
+def test_peer_suggester_clamps_score_to_0_5() -> None:
+    """LLM 给 99 / -3 这种异常值, 应 clamp 到 [0, 5]."""
+    from src.agents.peer_suggester import _parse_candidates
+
+    text = '```json\n[{"ticker":"02432","name":"x","similarity_score":99.0,"reason":"x"}]\n```'
+    out = _parse_candidates(text)
+    assert out[0].similarity_score == 5.0
+
+    text2 = '```json\n[{"ticker":"02432","name":"x","similarity_score":-3,"reason":"x"}]\n```'
+    out2 = _parse_candidates(text2)
+    assert out2[0].similarity_score == 0.0
+
+    # 缺字段 → 默认 3.0
+    text3 = '```json\n[{"ticker":"02432","name":"x","reason":"x"}]\n```'
+    out3 = _parse_candidates(text3)
+    assert out3[0].similarity_score == 3.0

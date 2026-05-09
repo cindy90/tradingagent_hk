@@ -96,6 +96,29 @@ def analyze(
         None, "--competing-ipos",
         help="未来 60 天同行业 IPO 队列代码列表（逗号分隔），用于资金分流分析",
     ),
+    # peer pool v2 控制
+    peer_pool_keywords: str | None = typer.Option(
+        None, "--peer-pool-keywords",
+        help="行业港股池过滤关键词（逗号分隔, 任一命中公司名即留）。"
+        "不传时从 --industry 自动派生（如 '工业机器人/协作' → ['机器人','工业','协作']）",
+    ),
+    target_market_cap: float | None = typer.Option(
+        None, "--target-market-cap",
+        help="目标公司估值（亿 HKD）, 用于行业池规模过滤（默认 0.2x-5x 区间）+ "
+        "PeerSuggester 评估规模匹配度",
+    ),
+    peer_pool_cap_min: float | None = typer.Option(
+        None, "--peer-pool-cap-min",
+        help="行业池市值下限（亿 HKD）, 显式指定则覆盖 0.2x 自动区间",
+    ),
+    peer_pool_cap_max: float | None = typer.Option(
+        None, "--peer-pool-cap-max",
+        help="行业池市值上限（亿 HKD）, 显式指定则覆盖 5x 自动区间",
+    ),
+    no_peer_pool: bool = typer.Option(
+        False, "--no-peer-pool",
+        help="禁用行业池（退化到 v1: LLM 从招股书 RAG 自由提取, 不推荐）",
+    ),
 ) -> None:
     """对单个 IPO 项目跑完整深度分析。"""
     _setup_logging()
@@ -171,6 +194,13 @@ def analyze(
     if competing_ipos:
         competing_ipos_list = [p.strip() for p in competing_ipos.split(",") if p.strip()]
 
+    peer_pool_kw_list: list[str] | None = None
+    if peer_pool_keywords:
+        peer_pool_kw_list = [k.strip() for k in peer_pool_keywords.split(",") if k.strip()]
+    cap_range: tuple[float, float] | None = None
+    if peer_pool_cap_min is not None or peer_pool_cap_max is not None:
+        cap_range = (peer_pool_cap_min, peer_pool_cap_max)  # type: ignore[assignment]
+
     workflow = CornerstoneWorkflow(debate_max_rounds=debate_rounds)
     ctx = workflow.run(
         ticker=ticker,
@@ -178,6 +208,10 @@ def analyze(
         industry=industry,
         roadshow_signals=roadshow_signals if roadshow_signals else None,
         competing_ipo_tickers=competing_ipos_list,
+        peer_pool_keywords=peer_pool_kw_list,
+        target_market_cap_hkd_b=target_market_cap,
+        peer_pool_cap_range=cap_range,
+        use_peer_pool=not no_peer_pool,
         prospectus_pdf=pdf_arg,
         peers=peer_list,
         peer_confirm_callback=callback,
@@ -212,13 +246,19 @@ def _interactive_peer_confirm(candidates: list) -> list[str]:
             show_default=False,
         )
     else:
-        table = Table(title="LLM 从招股书提取的可比公司候选")
+        table = Table(title="LLM 从行业港股池提取的可比公司候选 (按业务相似度降序)")
         table.add_column("#", style="cyan", no_wrap=True)
         table.add_column("代码", style="green")
         table.add_column("简称")
+        table.add_column("相似度", style="yellow")
+        table.add_column("市值(亿HKD)", style="dim")
         table.add_column("理由")
         for i, c in enumerate(candidates, 1):
-            table.add_row(str(i), c.ticker, c.name, c.reason)
+            score_str = f"{c.similarity_score:.1f}"
+            cap_str = (
+                f"{c.market_cap_hkd_b:.1f}" if c.market_cap_hkd_b is not None else "—"
+            )
+            table.add_row(str(i), c.ticker, c.name, score_str, cap_str, c.reason)
         console.print(table)
         console.print(
             "[bold]操作:[/bold] 直接回车=采用全部 / 输入逗号分隔代码=替换 / "

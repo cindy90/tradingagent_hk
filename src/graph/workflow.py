@@ -777,6 +777,10 @@ class CornerstoneWorkflow:
         ifind_target: str | None = None,
         roadshow_signals: dict | None = None,
         competing_ipo_tickers: list[str] | None = None,
+        peer_pool_keywords: list[str] | None = None,
+        target_market_cap_hkd_b: float | None = None,
+        peer_pool_cap_range: tuple[float, float] | None = None,
+        use_peer_pool: bool = True,
     ) -> AgentContext:
         # 1. 基础 prefetch (不依赖 peers)
         prefetched = self._prefetch_ths(ticker, industry)
@@ -788,9 +792,30 @@ class CornerstoneWorkflow:
         # 3. 交互式 peer 确认 (仅当未给 peers 且 callback 存在 且 RAG 可用)
         if not peers and peer_confirm_callback is not None and ctx.rag is not None:
             try:
+                # v2: 先从 akshare 拉行业港股池, 让 LLM 从池子里选
+                pool: list[dict] = []
+                if use_peer_pool:
+                    from src.data.peer_pool import build_peer_pool, derive_keywords_from_industry
+                    kws = peer_pool_keywords or derive_keywords_from_industry(ctx.industry)
+                    if kws:
+                        try:
+                            pool = build_peer_pool(
+                                kws,
+                                target_market_cap_hkd_b=target_market_cap_hkd_b,
+                                explicit_cap_range=peer_pool_cap_range,
+                            )
+                            logger.info(
+                                f"[PeerSuggester] 行业池构建完成: {len(pool)} 家 "
+                                f"(关键词={kws})"
+                            )
+                        except Exception as e:
+                            logger.warning(f"[PeerSuggester] 行业池构建失败: {e}")
+
                 from src.agents.peer_suggester import suggest_peers
                 candidates = suggest_peers(
-                    ctx.rag, ctx.company_name, ctx.industry, self.llm
+                    ctx.rag, ctx.company_name, ctx.industry, self.llm,
+                    pool=pool or None,
+                    target_market_cap_hkd_b=target_market_cap_hkd_b,
                 )
                 logger.info(f"[PeerSuggester] LLM 候选 {len(candidates)} 个")
                 peers = peer_confirm_callback(candidates) or None
@@ -809,6 +834,8 @@ class CornerstoneWorkflow:
             ifind_target=ifind_target,
             roadshow_signals=dict(roadshow_signals) if roadshow_signals else None,
             competing_ipo_tickers=list(competing_ipo_tickers) if competing_ipo_tickers else None,
+            peer_pool_keywords=list(peer_pool_keywords) if peer_pool_keywords else None,
+            target_market_cap_hkd_b=target_market_cap_hkd_b,
         )
 
         # 4. 用确认后的 peers + recent_ipos 拉 SDK 数据, setattr 到 ctx.extras
