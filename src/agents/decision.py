@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.agents.base import AgentContext, AgentReport, BaseAgent
 from src.llm import ModelTier
 
 DECISION_SYSTEM = """你是港股 IPO 基石投资委员会的首席投决官，向最终基金 GP 汇报。
+工作风格对标顶级投行 MD: 数据驱动、可证伪、可执行。
 
 你将收到来自多个研究 Agent 的简报（包括基本面、行业、宏观、可比估值、技术趋势、情绪、Bull/Bear 辩论结论、风控意见）。
 你的任务是：综合所有简报，给出最终基石投资建议。
@@ -41,7 +42,34 @@ DECISION_SYSTEM = """你是港股 IPO 基石投资委员会的首席投决官，
 - monitoring_kpis 必须**可观测**（"Q1 经营现金流 vs 阈值" 优于 "管理层执行力"）。
 - 提到具体公司时, 只允许使用上游 Agent 简报已用过的公司名。
 
-输出严格按下述 JSON 结构（用 ```json``` 代码块包裹），之后再补一段中文论述（不超过 800 字）：
+【专业级新增要求】
+1. **三档情景敏感性分析（必填 sensitivity_table）**:
+   - "悲观" / "基准" / "乐观" 三档, 每档明确给出:
+     * triggers: 1-3 条触发该情景的条件（必须可量化, 例如"H1 毛利率 < 30%" 而非"业绩疲弱"）
+     * valuation_hkd_b: 该情景下的合理估值
+     * probability: 主观概率 0-1, 三档之和应 ≈ 1.0
+     * expected_return_pct: 该情景下相对招股价的回报率（%）
+   - 这三档同时也是 Bull/Bear 辩论结论的"事后可验证清单"
+
+2. **对冲与退出策略（hedging_strategy + exit_plan）**:
+   - hedging_strategy: 锁定期 6 个月内的对冲思路（恒生科技 ETF PUT / 行业 long-short / 不对冲）
+     * instrument / target_coverage_pct (0-1, 名义本金占比) / rationale
+   - exit_plan: 解禁日的减持节奏
+     * horizon ("解禁日 D+0" / "T+5") / method ("VWAP" / "市价" / "限价") / pace ("一次性" / "分 5 日") /
+       trigger_conditions（提前减持的条件）
+
+3. **kill_switches（认购后退出触发）**:
+   - 已认购后某些事件应触发立刻减持/对冲, 列出 3-5 条:
+     * trigger: 触发事件描述（必须可观测, 如"创始人或 CTO 任一离职 30 天内"）
+     * action: 对应动作（"立刻减持 100%" / "对冲 30% 名义本金" / "暂停认购"）
+     * severity: "高" / "中" / "低"
+
+4. **monitoring_kpis 升级**:
+   - 不再是文本列表, 而是结构化:
+     * name (KPI 名) / threshold (阈值, 如"< 30%"或"> 200 天") /
+       frequency ("季报" / "月报" / "事件触发") / action_if_breach（违阈后的动作）
+
+输出严格按下述 JSON 结构（用 ```json``` 代码块包裹），之后再补一段中文论述（不超过 1200 字）：
 
 ```json
 {
@@ -49,30 +77,72 @@ DECISION_SYSTEM = """你是港股 IPO 基石投资委员会的首席投决官，
   "confidence": "高|中|低",
   "suggested_amount_usd_million": [下限, 上限],
   "valuation_range_hkd_billion": {
-    "low": <数字>,
-    "mid": <数字>,
-    "high": <数字>,
-    "anchor_method": "PE|PS|EV/EBITDA|DCF|多方法加权",
-    "anchor_logic": "<一句话锚定逻辑>"
+    "low": <数字>, "mid": <数字>, "high": <数字>,
+    "anchor_method": "PE|PS|EV/EBITDA|DCF|多方法加权|PEG",
+    "anchor_logic": "<一句话锚定逻辑, 必须引用 comparable agent 的具体倍数>"
   },
   "ipo_pricing_view": "估值偏低|合理|偏高|严重高估",
+  "sensitivity_table": [
+    {
+      "name": "悲观",
+      "triggers": ["H1 毛利率 < 30%", "Q1 经营现金流转负"],
+      "valuation_hkd_b": 45.0,
+      "probability": 0.30,
+      "expected_return_pct": -44.0
+    },
+    {"name": "基准", "triggers": [...], "valuation_hkd_b": 80.0, "probability": 0.50, "expected_return_pct": 0.0},
+    {"name": "乐观", "triggers": [...], "valuation_hkd_b": 130.0, "probability": 0.20, "expected_return_pct": 62.5}
+  ],
+  "hedging_strategy": {
+    "instrument": "恒生科技 ETF (3033.HK) PUT / 不对冲",
+    "target_coverage_pct": 0.30,
+    "rationale": "<为什么这样对冲, 1 句话>"
+  },
+  "exit_plan": {
+    "horizon": "解禁日 D+0 / T+5",
+    "method": "VWAP / 限价 / 市价",
+    "pace": "一次性 / 分 5 日",
+    "trigger_conditions": ["<提前减持的硬性条件, 如:解禁前股价跌破招股价 30%>"]
+  },
+  "kill_switches": [
+    {"trigger": "创始人或 CTO 任一在 30 天内离职", "action": "立刻减持 100%", "severity": "高"},
+    {"trigger": "监管问询函连续 2 次同类", "action": "减持 50% + 对冲剩余", "severity": "高"},
+    {"trigger": "Q1 经营现金流连续两季为负", "action": "启动 ETF PUT 对冲", "severity": "中"}
+  ],
   "key_supports": ["<3-5 条支持理由，每条不超过 30 字>"],
   "key_risks": ["<3-5 条核心风险，每条不超过 30 字>"],
-  "deal_conditions": ["<对基石条款/估值的硬性要求，例如最高可接受估值上限>"],
-  "monitoring_kpis": ["<上市后需重点跟踪的 3-5 个 KPI>"]
+  "deal_conditions": ["<对基石条款/估值的硬性要求, 必须可量化>"],
+  "monitoring_kpis": ["<向后兼容的简短文本列表, 由 monitoring_kpis_detailed 自动生成>"],
+  "monitoring_kpis_detailed": [
+    {
+      "name": "毛利率",
+      "threshold": "< 30%",
+      "frequency": "季报",
+      "action_if_breach": "触发风险评估 + 考虑减持 30%"
+    }
+  ]
 }
 ```
 
-之后用以下 Markdown 章节展开论述：
+之后用以下 Markdown 章节展开论述（新增 4 节是专业级 IC memo 必备）：
 
-## 投决论述
+## 一、投决论述
 （综合论证，引用各 Agent 简报中的证据）
 
-## 与 Bull/Bear 辩论的关系
+## 二、与 Bull/Bear 辩论的关系
 （说明你采纳了哪一方哪些观点，为什么）
 
-## 风险敞口与对冲思路
-（列出主要不确定性和应对方式）"""
+## 三、敏感性分析详解 ⭐
+（针对悲观/基准/乐观三档, 解释 triggers 为何可量化, 估值如何反推, 概率如何主观赋值）
+
+## 四、对冲与退出策略 ⭐
+（解释 hedging_strategy 和 exit_plan 的逻辑, 为什么这种节奏 / 工具）
+
+## 五、Kill Switches 触发条件 ⭐
+（解释每条退出触发的合理性, 指出对应的 monitoring_kpis）
+
+## 六、风险敞口与不确定性
+（列出主要不确定性和应对方式, 引用风控简报）"""
 
 
 _REC_VALUES = {"认购", "审慎参与", "观望", "不认购"}
@@ -88,8 +158,59 @@ class ValuationRange(BaseModel):
     anchor_logic: str
 
 
+# --- 专业级新增：敏感性 / 对冲 / 退出 / kill switches / 详细 KPI ---
+
+class ScenarioRow(BaseModel):
+    """敏感性分析的一行情景。"""
+    model_config = ConfigDict(extra="ignore")
+    name: str  # 悲观 / 基准 / 乐观（或更细分）
+    triggers: list[str] = Field(default_factory=list, description="触发该情景的 1-3 条可量化条件")
+    valuation_hkd_b: float
+    probability: float = Field(ge=0, le=1)
+    expected_return_pct: float | None = Field(default=None, description="该情景下相对招股价回报率")
+
+
+class HedgingStrategy(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    instrument: str = "不对冲"
+    target_coverage_pct: float = Field(default=0.0, ge=0, le=1, description="对冲名义本金占比")
+    rationale: str = ""
+
+
+class ExitPlan(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    horizon: str = "解禁日 D+0"
+    method: str = "VWAP"
+    pace: str = "一次性"
+    trigger_conditions: list[str] = Field(default_factory=list)
+
+
+class KillSwitch(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    trigger: str
+    action: str
+    severity: Literal["高", "中", "低"] = "中"
+
+
+class MonitoringKPI(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str
+    threshold: str = ""
+    frequency: str = "季报"
+    action_if_breach: str = ""
+
+
 class DecisionResult(BaseModel):
-    """投决结果 schema。LLM 输出必须能转成本模型，否则触发重试。"""
+    """投决结果 schema。LLM 输出必须能转成本模型，否则触发重试。
+
+    新增字段（专业级 IC memo 标志）：
+    - sensitivity_table: 三档情景敏感性
+    - hedging_strategy / exit_plan: 锁定期对冲 + 解禁退出
+    - kill_switches: 认购后退出触发
+    - monitoring_kpis_detailed: 阈值化 KPI（旧 monitoring_kpis 文本列表向后兼容）
+    """
+    model_config = ConfigDict(extra="ignore")
+
     recommendation: str = Field(description="认购/审慎参与/观望/不认购")
     confidence: str = Field(description="高/中/低")
     suggested_amount_usd_million: list[float] = Field(min_length=2, max_length=2)
@@ -99,6 +220,16 @@ class DecisionResult(BaseModel):
     key_risks: list[str] = Field(min_length=1)
     deal_conditions: list[str] = Field(default_factory=list)
     monitoring_kpis: list[str] = Field(default_factory=list)
+
+    # 专业级新增字段（向后兼容：默认 None / 空 list）
+    sensitivity_table: list[ScenarioRow] = Field(
+        default_factory=list,
+        description="三档情景敏感性（悲观/基准/乐观），probability 之和应 ≈ 1",
+    )
+    hedging_strategy: HedgingStrategy | None = None
+    exit_plan: ExitPlan | None = None
+    kill_switches: list[KillSwitch] = Field(default_factory=list)
+    monitoring_kpis_detailed: list[MonitoringKPI] = Field(default_factory=list)
 
 
 def _briefs_block(briefs: dict[str, str]) -> str:

@@ -94,11 +94,17 @@ class ComparableScoreCard(AgentScoreCard):
     median_pe: float | None = None
     median_ps: float | None = None
     median_ev_ebitda: float | None = None
+    median_peg: float | None = None  # 新增: PEG = PE / 净利润 CAGR
     valuation_low_hkd_b: float | None = None
     valuation_mid_hkd_b: float
     valuation_high_hkd_b: float | None = None
-    valuation_method: Literal["PE", "PS", "EV/EBITDA", "DCF", "weighted", "other"] = "PE"
+    valuation_method: Literal["PE", "PS", "EV/EBITDA", "DCF", "weighted", "other", "PEG", "SOTP"] = "PE"
     ipo_discount_assumed_pct: float = 0.15  # 港股 IPO 通常打 10-25% 折扣
+
+    # 反推估值: 招股价中枢隐含的未来 1 年营收 CAGR (%)
+    implied_revenue_cagr_at_ipo: float | None = None
+    # 多业务线 SOTP 分拆 (可选): {业务线名: 估值贡献亿 HKD}
+    sotp_breakdown: dict[str, float] = Field(default_factory=dict)
 
 
 class TechTrendScoreCard(AgentScoreCard):
@@ -114,11 +120,26 @@ class SentimentScoreCard(AgentScoreCard):
     market_attention_score: float = Field(ge=0, le=5)
 
 
+class RiskItem(BaseModel):
+    """单维度风险的三维量化（概率 × 影响 × 预警信号）。"""
+    model_config = ConfigDict(extra="ignore")
+    dimension: str  # 财务造假 / 行业逆风 / 估值高估 / ...
+    score: float = Field(ge=1, le=5, description="1=极高 5=极低")
+    probability: Literal["极低", "低", "中", "高"] = "中"
+    impact: Literal["小", "中", "大", "极大"] = "中"
+    early_warning: list[str] = Field(default_factory=list, description="可观测的预警阈值")
+
+
 class RiskScoreCard(AgentScoreCard):
     overall_risk_level: float = Field(ge=1, le=5, description="1=极高风险 5=极低")
     risk_dimensions: dict[str, float] = Field(
         default_factory=dict,
-        description="8 维风险细分: 财务造假/行业逆风/估值高估/流动性/股东减持/监管/治理/ESG",
+        description="8 维风险综合评分（向后兼容）: 财务造假/行业逆风/估值高估/流动性/股东减持/监管/治理/ESG",
+    )
+    # 新增: 三维量化的详细风险项
+    detailed_risks: list[RiskItem] = Field(
+        default_factory=list,
+        description="每维度风险的概率 × 影响 × 预警信号，专业级风险矩阵的结构化输出",
     )
     veto_conditions: list[str] = Field(default_factory=list)
     must_satisfy_conditions: list[str] = Field(default_factory=list)
