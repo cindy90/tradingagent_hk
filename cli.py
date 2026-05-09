@@ -119,6 +119,42 @@ def analyze(
         False, "--no-peer-pool",
         help="禁用行业池（退化到 v1: LLM 从招股书 RAG 自由提取, 不推荐）",
     ),
+    # 上市档案 (ListingProfile) — 决定差异化权重 / 估值方法 / 风险维度
+    listing_chapter: str | None = typer.Option(
+        None, "--listing-chapter",
+        help="HKEX 上市规则章节: Main_Board_Standard / Main_Board_18A (未盈利生物科技) / "
+        "Main_Board_18C (特专科技) / Main_Board_19C (WVR) / "
+        "Secondary_Listing (二次上市) / Dual_Primary_AH (AH 双重) / GEM. "
+        "不传时由 detector 从招股书自动推断。",
+    ),
+    profitability_stage: str | None = typer.Option(
+        None, "--profitability-stage",
+        help="盈利状态: Profitable_Stable / Profitable_Growth / Pre_Profit_Late_Stage / "
+        "Loss_Making_Growth / Pre_Commercial. 影响估值方法选择。",
+    ),
+    size_tier: str | None = typer.Option(
+        None, "--size-tier",
+        help="规模档 (亿 HKD): Small <30 / Mid 30-300 / Large 300-1000 / Mega >1000. "
+        "不传时按 --target-market-cap 自动判断。",
+    ),
+    industry_theme: str | None = typer.Option(
+        None, "--industry-theme",
+        help="行业主题: Tech_AI_Semi / Bio_Pharma / Med_Device / Robotics_Automation / "
+        "New_Energy / Advanced_Materials / Consumer / Financial / Real_Estate / "
+        "Industrial / Healthcare / Other",
+    ),
+    has_wvr: bool = typer.Option(
+        False, "--has-wvr",
+        help="是否同股不同权架构 (影响治理风险加权)",
+    ),
+    a_share_ticker: str | None = typer.Option(
+        None, "--a-share-ticker",
+        help="A 股代码（如已 A 股上市，例: 688256）, 触发 A-H 折价估值锚定",
+    ),
+    main_listing_market: str | None = typer.Option(
+        None, "--main-listing-market",
+        help="二次上市的主上市地, 例: NASDAQ / NYSE",
+    ),
     no_html: bool = typer.Option(
         False, "--no-html",
         help="禁用 FINAL_MEMO.html 渲染（默认同时输出 .md + .html）",
@@ -209,6 +245,36 @@ def analyze(
     if peer_pool_cap_min is not None or peer_pool_cap_max is not None:
         cap_range = (peer_pool_cap_min, peer_pool_cap_max)  # type: ignore[assignment]
 
+    # ListingProfile 显式输入 (CLI 优先, detector 兜底)
+    explicit_profile_kwargs: dict = {}
+    if listing_chapter:
+        explicit_profile_kwargs["listing_chapter"] = listing_chapter
+    if profitability_stage:
+        explicit_profile_kwargs["profitability_stage"] = profitability_stage
+    if size_tier:
+        explicit_profile_kwargs["size_tier"] = size_tier
+    elif target_market_cap is not None:
+        # 按 target_market_cap 自动归档
+        if target_market_cap < 30:
+            explicit_profile_kwargs["size_tier"] = "Small"
+        elif target_market_cap < 300:
+            explicit_profile_kwargs["size_tier"] = "Mid"
+        elif target_market_cap < 1000:
+            explicit_profile_kwargs["size_tier"] = "Large"
+        else:
+            explicit_profile_kwargs["size_tier"] = "Mega"
+    if industry_theme:
+        explicit_profile_kwargs["industry_theme"] = industry_theme
+    if has_wvr:
+        explicit_profile_kwargs["has_wvr"] = True
+    if a_share_ticker:
+        explicit_profile_kwargs["has_a_share_listed"] = True
+        explicit_profile_kwargs["a_share_ticker"] = a_share_ticker
+    if main_listing_market:
+        explicit_profile_kwargs["main_listing_market"] = main_listing_market
+        if not listing_chapter:
+            explicit_profile_kwargs["listing_chapter"] = "Secondary_Listing"
+
     workflow = CornerstoneWorkflow(debate_max_rounds=debate_rounds)
     ctx = workflow.run(
         ticker=ticker,
@@ -216,6 +282,7 @@ def analyze(
         industry=industry,
         roadshow_signals=roadshow_signals if roadshow_signals else None,
         competing_ipo_tickers=competing_ipos_list,
+        explicit_listing_profile=explicit_profile_kwargs or None,
         peer_pool_keywords=peer_pool_kw_list,
         target_market_cap_hkd_b=target_market_cap,
         peer_pool_cap_range=cap_range,

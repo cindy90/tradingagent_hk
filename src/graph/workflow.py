@@ -787,6 +787,8 @@ class CornerstoneWorkflow:
         target_market_cap_hkd_b: float | None = None,
         peer_pool_cap_range: tuple[float, float] | None = None,
         use_peer_pool: bool = True,
+        explicit_listing_profile: dict | None = None,
+        use_listing_profile_detector: bool = True,
     ) -> AgentContext:
         # 1. 基础 prefetch (不依赖 peers)
         prefetched = self._prefetch_ths(ticker, industry)
@@ -842,6 +844,7 @@ class CornerstoneWorkflow:
             competing_ipo_tickers=list(competing_ipo_tickers) if competing_ipo_tickers else None,
             peer_pool_keywords=list(peer_pool_keywords) if peer_pool_keywords else None,
             target_market_cap_hkd_b=target_market_cap_hkd_b,
+            explicit_listing_profile=dict(explicit_listing_profile) if explicit_listing_profile else None,
         )
 
         # 4. 用确认后的 peers + recent_ipos 拉 SDK 数据, setattr 到 ctx.extras
@@ -899,6 +902,16 @@ class CornerstoneWorkflow:
             except Exception as e:
                 logger.warning(f"CaseRAG 检索失败（不影响主流程）: {e}")
 
+        # 上市档案 ListingProfile: 显式 CLI > detector 推断 > Unknown 兜底
+        try:
+            self._build_listing_profile(
+                ctx,
+                explicit=explicit_listing_profile,
+                use_detector=use_listing_profile_detector,
+            )
+        except Exception as e:
+            logger.warning(f"ListingProfile 构建失败（不影响主流程）: {e}")
+
         # 决策因子权重校准 priors (Phase B): 同行业历史复盘 → 平均偏差 → 注入
         # 样本数 < 5 时优雅降级 (返回空, Decision prompt 不渲染)
         try:
@@ -944,6 +957,94 @@ class CornerstoneWorkflow:
             logger.warning(f"prediction 落库失败（不影响报告产出）: {e}")
         logger.info(f"=== 工作流完成，报告目录: {ctx.reports_dir} ===")
         return ctx
+
+    def _build_listing_profile(
+        self,
+        ctx: AgentContext,
+        *,
+        explicit: dict | None = None,
+        use_detector: bool = True,
+    ) -> None:
+        """构造 ListingProfile, 注入 ctx.extras.listing_profile。
+
+        优先级: 显式 CLI 参数 > detector 推断 > Unknown 兜底。
+        显式给的字段不会被 detector 覆盖（用户输入最权威）。
+        """
+        from src.agents.listing_profile import ListingProfile
+
+        explicit = explicit or {}
+        # 行业主题缺失时尝试从 industry 字段推断
+        if "industry_theme" not in explicit:
+            explicit["industry_theme"] = self._guess_industry_theme(ctx.industry)
+
+        # detector 仅当 listing_chapter / profitability_stage 等关键字段缺失时跑
+        needs_detection = (
+            "listing_chapter" not in explicit
+            or "profitability_stage" not in explicit
+        )
+
+        detected: dict = {}
+        if use_detector and needs_detection and ctx.rag is not None and ctx.rag.is_indexed():
+            try:
+                from src.agents.listing_profile_detector import detect_listing_profile
+                detected = detect_listing_profile(ctx.rag, ctx.company_name, self.llm) or {}
+            except ImportError:
+                # detector 还没实现 (C2.5 之前), 静默跳过
+                pass
+            except Exception as e:
+                logger.warning(f"ListingProfileDetector 失败: {e}")
+
+        # 合并: 显式 > 推断 > 默认
+        merged = {**detected, **explicit}
+        if explicit and not detected:
+            merged["detection_confidence"] = "显式确认"
+        elif detected and not explicit:
+            merged["detection_confidence"] = "招股书推断"
+        elif merged.get("listing_chapter", "Unknown") != "Unknown":
+            merged["detection_confidence"] = "显式确认"
+
+        try:
+            profile = ListingProfile.model_validate(merged)
+        except Exception as e:
+            logger.warning(f"ListingProfile 校验失败: {e}, 用 Unknown 兜底")
+            profile = ListingProfile()
+        ctx.extras.listing_profile = profile
+        logger.info(
+            f"[ListingProfile] chapter={profile.listing_chapter} / "
+            f"stage={profile.profitability_stage} / size={profile.size_tier} / "
+            f"theme={profile.industry_theme} / wvr={profile.has_wvr} / "
+            f"a-share={profile.has_a_share_listed} / 置信={profile.detection_confidence}"
+        )
+
+    @staticmethod
+    def _guess_industry_theme(industry: str) -> str:
+        """从 industry 关键字粗略归类到 ListingProfile.industry_theme。"""
+        if not industry:
+            return "Other"
+        low = industry.lower()
+        if any(k in industry for k in ["生物", "医药", "制药", "Bio", "Pharma"]) or "pharm" in low:
+            return "Bio_Pharma"
+        if any(k in industry for k in ["医疗器械", "Med Device"]):
+            return "Med_Device"
+        if any(k in industry for k in ["机器人", "工业自动化", "协作", "Robotic"]):
+            return "Robotics_Automation"
+        if any(k in industry for k in ["AI", "人工智能", "半导体", "芯片", "Semi"]):
+            return "Tech_AI_Semi"
+        if any(k in industry for k in ["新能源", "光伏", "电池"]):
+            return "New_Energy"
+        if any(k in industry for k in ["材料"]):
+            return "Advanced_Materials"
+        if any(k in industry for k in ["消费", "零售", "餐饮", "服装"]):
+            return "Consumer"
+        if any(k in industry for k in ["金融", "银行", "保险", "证券"]):
+            return "Financial"
+        if any(k in industry for k in ["地产", "房地产", "物业"]):
+            return "Real_Estate"
+        if any(k in industry for k in ["医疗", "Health"]):
+            return "Healthcare"
+        if any(k in industry for k in ["工业", "制造", "Industrial"]):
+            return "Industrial"
+        return "Other"
 
     @staticmethod
     def _inject_weight_priors(ctx: AgentContext, min_samples: int = 5) -> None:

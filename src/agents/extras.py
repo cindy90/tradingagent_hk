@@ -49,6 +49,10 @@ class WorkflowExtras:
     # 聚合同行业 calibration, 注入 Decision Agent 作为软引导
     weight_priors: dict = field(default_factory=dict)
 
+    # 上市档案 (ListingProfile) - 决定权重区间 / 估值方法 / 风险维度的差异化
+    # 类型用 Any 避免循环 import; 实际是 src.agents.listing_profile.ListingProfile
+    listing_profile: Any = None
+
     # 目标公司本身的 iFinD 估值/财务（IPO 询价阶段也常已建档）
     target_valuation: dict | None = None
 
