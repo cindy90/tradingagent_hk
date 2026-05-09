@@ -107,3 +107,89 @@ def test_rag_bge_query_prefix_detection() -> None:
     rag_minilm = ProspectusRAG(project_id="t", embedding_model="sentence-transformers/all-MiniLM-L6-v2")
     assert rag_bge._is_bge_zh() is True
     assert rag_minilm._is_bge_zh() is False
+
+
+def test_router_provider_specific_override(monkeypatch) -> None:
+    """provider-specific env > generic env > default."""
+    from config import get_settings
+    from src.llm.router import ModelTier, resolve_model
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("LLM_PROVIDER", "kimi")
+    monkeypatch.setenv("MODEL_TIER_DECIDE_KIMI", "kimi-latest-overridden")
+    assert resolve_model(ModelTier.DECIDE) == "kimi-latest-overridden"
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.delenv("MODEL_TIER_DECIDE_KIMI", raising=False)
+    # 不设 deepseek override，应走内置默认
+    assert resolve_model(ModelTier.DECIDE) == "deepseek-reasoner"
+
+    get_settings.cache_clear()
+
+
+def test_llm_client_with_mock_provider() -> None:
+    """用 mock provider 验证 LLMClient → ledger 链路。"""
+    from src.llm import LLMClient
+    from src.llm.client import LLMResponse
+    from src.llm.router import ModelTier
+
+    class _Mock:
+        def complete(self, *, model, system, messages, max_tokens, temperature, cached_system_blocks):
+            return LLMResponse(
+                text="mock 响应",
+                input_tokens=100,
+                output_tokens=50,
+                cache_read_tokens=20,
+                model=model,
+            )
+
+    client = LLMClient(provider=_Mock(), provider_name="mock")
+    resp = client.complete(
+        tier=ModelTier.ANALYZE,
+        system="你是测试 agent",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert resp.text == "mock 响应"
+    assert client.ledger.by_tier["analyze"]["input"] == 100
+    assert client.ledger.by_tier["analyze"]["calls"] == 1
+
+
+def test_openai_compat_provider_merges_system_into_messages() -> None:
+    """验证 _OpenAICompatProvider 把 system + cached_system_blocks 合并到 messages[0]."""
+    from src.llm.client import _OpenAICompatProvider, LLMResponse
+
+    class _FakeOpenAI:
+        def __init__(self):
+            self.last_call = None
+            self.chat = self
+            self.completions = self
+
+        def create(self, *, model, messages, max_tokens, temperature):
+            self.last_call = {"model": model, "messages": messages}
+            class _Choice:
+                message = type("M", (), {"content": "ok"})()
+            class _Usage:
+                prompt_tokens = 10
+                completion_tokens = 5
+                prompt_cache_hit_tokens = 0
+            return type("R", (), {"choices": [_Choice()], "usage": _Usage()})()
+
+    p = _OpenAICompatProvider.__new__(_OpenAICompatProvider)
+    p.client = _FakeOpenAI()
+    p.provider_name = "test"
+
+    p.complete(
+        model="kimi-latest",
+        system="你是分析师",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=100,
+        temperature=0.3,
+        cached_system_blocks=["招股书静态内容"],
+    )
+    msgs = p.client.last_call["messages"]
+    assert msgs[0]["role"] == "system"
+    # cached blocks 在前，system 在后
+    assert msgs[0]["content"].startswith("招股书静态内容")
+    assert "你是分析师" in msgs[0]["content"]
+    assert msgs[1]["role"] == "user"

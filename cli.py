@@ -45,8 +45,10 @@ def analyze(
     """对单个 IPO 项目跑完整深度分析。"""
     _setup_logging()
     s = get_settings()
-    if not s.anthropic_api_key:
-        console.print("[red]ANTHROPIC_API_KEY 未设置，请先配置 .env[/red]")
+    provider = (s.llm_provider or "anthropic").lower()
+    key_map = {"anthropic": s.anthropic_api_key, "kimi": s.kimi_api_key, "deepseek": s.deepseek_api_key}
+    if not key_map.get(provider):
+        console.print(f"[red]LLM_PROVIDER={provider} 但对应 API Key 未配置[/red]")
         raise typer.Exit(code=1)
 
     pdf_arg: Path | None = None

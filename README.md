@@ -64,10 +64,11 @@
 
 | 优化项 | 实现位置 | 说明 |
 |---|---|---|
-| 分级模型路由 | `src/llm/router.py` | Haiku 摘要 / Sonnet 分析 / Opus 决策 |
-| Prompt Caching | `src/llm/client.py` | `cached_system_blocks` 把招股书前文缓存 |
-| 中间层压缩 | `src/agents/summarizer.py` | 每个 Agent 输出后用 Haiku 压成 ≤500 字 brief，下游只读 brief |
-| RAG 按需检索 | `src/data/rag.py` | 招股书不全文喂入，按主题检索 |
+| 多 provider 切换 | `src/llm/client.py` | 支持 Anthropic / Kimi / DeepSeek，按需选成本最低的 |
+| 分级模型路由 | `src/llm/router.py` | 各 provider 都有 SUMMARIZE / ANALYZE / DECIDE 三档默认模型 |
+| Prompt Caching | `src/llm/client.py` | Anthropic 走 cache_control；Kimi/DeepSeek 自动按前缀命中 |
+| 中间层压缩 | `src/agents/summarizer.py` | 每个 Agent 输出后用 SUMMARIZE 档压成 ≤500 字 brief |
+| RAG 按需检索 | `src/data/rag.py` | 招股书不全文喂入，按主题检索；BGE-zh embedding |
 | 确定性工具 | `src/tools/*` | 估值/财务指标 Python 算好再喂，不让 LLM 推数 |
 | 辩论早停 | `src/agents/debate.py` | Bull/Bear brief Jaccard 相似度 > 阈值即停 |
 | 数据缓存 | `src/data/cache.py` | SQLite 持久化 akshare / THS 调用结果 |
@@ -140,8 +141,36 @@ pip install -e .
 
 # 3. 配置 .env
 cp .env.example .env
-# 编辑 .env 至少填入 ANTHROPIC_API_KEY
+# 至少填: LLM_PROVIDER + 对应的 API Key
 ```
+
+### LLM Provider 选择
+
+支持三家，按需切换：
+
+| Provider | 适用场景 | 默认 tier 模型 (SUMMARIZE / ANALYZE / DECIDE) |
+|---|---|---|
+| `anthropic` | 质量最高，token 最贵 | claude-haiku-4-5 / claude-sonnet-4-6 / claude-opus-4-7 |
+| `kimi` | 中文+长上下文友好，性价比高，国内合规 | moonshot-v1-8k / moonshot-v1-32k / kimi-latest |
+| `deepseek` | 极低成本，自动 prompt caching | deepseek-chat / deepseek-chat / deepseek-reasoner |
+
+**用 Kimi（推荐起步）：**
+```env
+LLM_PROVIDER=kimi
+KIMI_API_KEY=sk-...
+# 可选：覆盖默认模型，例如全部用长上下文模型
+# MODEL_TIER_ANALYZE_KIMI=moonshot-v1-128k
+```
+
+**用 DeepSeek：**
+```env
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=sk-...
+# DeepSeek 自动 prompt caching，>1k token 输入会自动命中（计费按 cache hit 价）
+```
+
+> Kimi/DeepSeek 都走 OpenAI 兼容协议，本项目用 `openai` SDK 调用。
+> 对应的 prompt caching 机制：Anthropic 显式 `cache_control` / Kimi 自动前缀缓存 / DeepSeek 自动前缀缓存。
 
 ### 同花顺 iFinD QuantAPI 接入
 
@@ -222,6 +251,35 @@ python cli.py show-config
 - `reports/<project_id>/01_*.md` ~ `09_*.md` — 各 Agent 完整研究报告
 - `reports/<project_id>/*.brief.md` — 各 Agent 简报（流转用）
 - `reports/<project_id>/_token_usage.md` — token 消耗账本
+
+### 案例：珞石机器人（Loctek Robotics）测试流程
+
+```bash
+# 1. 配置 Kimi 和 同花顺
+cat >> .env <<EOF
+LLM_PROVIDER=kimi
+KIMI_API_KEY=sk-你的key
+THS_REFRESH_TOKEN=你的refresh_token
+EOF
+
+# 2. 执行（招股书会通过 THS 自动拉）
+python cli.py analyze \
+    --ticker <珞石港股代码> \
+    --name "珞石（北京）科技有限公司" \
+    --industry "工业机器人/协作机器人"
+
+# 若 THS 暂未收录可手动放 PDF：
+# 把招股书丢到 data/prospectus/<ticker>.pdf 即可
+
+# 3. 看 token 消耗
+cat reports/<project_id>/_token_usage.md
+```
+
+**预估 token 消耗（Kimi 全家桶）：**
+- 单次完整跑通约 30-50 万 token（含 RAG 检索 + 8 Agent + 2 轮辩论 + 风控 + 决策）
+- Kimi 当前定价约 ¥12/百万 token（输入），单次成本约 ¥4-7
+- 同条件用 Anthropic Opus/Sonnet/Haiku 混合约 $3-8（约 ¥20-60）
+- 同条件用 DeepSeek 约 ¥0.5-2（cache hit 后更低）
 
 ---
 

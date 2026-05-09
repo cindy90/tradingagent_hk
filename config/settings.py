@@ -13,7 +13,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    llm_provider: str = Field(default="anthropic", alias="LLM_PROVIDER")
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+    kimi_api_key: str = Field(default="", alias="KIMI_API_KEY")
+    kimi_base_url: str = Field(default="https://api.moonshot.cn/v1", alias="KIMI_BASE_URL")
+    deepseek_api_key: str = Field(default="", alias="DEEPSEEK_API_KEY")
+    deepseek_base_url: str = Field(default="https://api.deepseek.com/v1", alias="DEEPSEEK_BASE_URL")
 
     ths_refresh_token: str = Field(default="", alias="THS_REFRESH_TOKEN")
     ths_token_cache: str = Field(default="", alias="THS_TOKEN_CACHE")
@@ -25,11 +30,20 @@ class Settings(BaseSettings):
     reports_dir: Path = Field(default=Path("./reports"), alias="REPORTS_DIR")
     prospectus_dir: Path = Field(default=Path("./data/prospectus"), alias="PROSPECTUS_DIR")
 
-    model_tier_summarize: str = Field(
-        default="claude-haiku-4-5-20251001", alias="MODEL_TIER_SUMMARIZE"
-    )
-    model_tier_analyze: str = Field(default="claude-sonnet-4-6", alias="MODEL_TIER_ANALYZE")
-    model_tier_decide: str = Field(default="claude-opus-4-7", alias="MODEL_TIER_DECIDE")
+    model_tier_summarize: str = Field(default="", alias="MODEL_TIER_SUMMARIZE")
+    model_tier_analyze: str = Field(default="", alias="MODEL_TIER_ANALYZE")
+    model_tier_decide: str = Field(default="", alias="MODEL_TIER_DECIDE")
+
+    # Provider-specific tier overrides
+    model_tier_summarize_anthropic: str = Field(default="", alias="MODEL_TIER_SUMMARIZE_ANTHROPIC")
+    model_tier_analyze_anthropic: str = Field(default="", alias="MODEL_TIER_ANALYZE_ANTHROPIC")
+    model_tier_decide_anthropic: str = Field(default="", alias="MODEL_TIER_DECIDE_ANTHROPIC")
+    model_tier_summarize_kimi: str = Field(default="", alias="MODEL_TIER_SUMMARIZE_KIMI")
+    model_tier_analyze_kimi: str = Field(default="", alias="MODEL_TIER_ANALYZE_KIMI")
+    model_tier_decide_kimi: str = Field(default="", alias="MODEL_TIER_DECIDE_KIMI")
+    model_tier_summarize_deepseek: str = Field(default="", alias="MODEL_TIER_SUMMARIZE_DEEPSEEK")
+    model_tier_analyze_deepseek: str = Field(default="", alias="MODEL_TIER_ANALYZE_DEEPSEEK")
+    model_tier_decide_deepseek: str = Field(default="", alias="MODEL_TIER_DECIDE_DEEPSEEK")
 
     debate_max_rounds: int = Field(default=2, alias="DEBATE_MAX_ROUNDS")
     rag_top_k: int = Field(default=6, alias="RAG_TOP_K")
