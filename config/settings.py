@@ -15,8 +15,9 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
 
-    ths_user: str = Field(default="", alias="THS_USER")
-    ths_password: str = Field(default="", alias="THS_PASSWORD")
+    ths_refresh_token: str = Field(default="", alias="THS_REFRESH_TOKEN")
+    ths_token_cache: str = Field(default="", alias="THS_TOKEN_CACHE")
+    ths_token_ttl: int = Field(default=21600, alias="THS_TOKEN_TTL")
     hkex_api_key: str = Field(default="", alias="HKEX_API_KEY")
 
     data_dir: Path = Field(default=Path("./data"), alias="DATA_DIR")

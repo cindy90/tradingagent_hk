@@ -17,6 +17,7 @@ from loguru import logger
 from rich.console import Console
 
 from config import get_settings
+from src.data.ths_client import THSClient
 from src.graph import CornerstoneWorkflow
 from src.reports import write_final_summary
 
@@ -35,9 +36,11 @@ def analyze(
     ticker: str = typer.Option(..., "--ticker", "-t", help="港股代码，5 位数字，例如 09999"),
     name: str = typer.Option(..., "--name", "-n", help="公司中文名"),
     industry: str = typer.Option(..., "--industry", "-i", help="所属行业关键字"),
-    pdf: Path | None = typer.Option(None, "--pdf", "-p", help="本地招股书 PDF 路径"),
+    pdf: Path | None = typer.Option(None, "--pdf", "-p", help="本地招股书 PDF 路径（不传则自动尝试本地缓存或同花顺）"),
     debate_rounds: int | None = typer.Option(None, "--debate-rounds", help="辩论最大轮数"),
     no_prospectus: bool = typer.Option(False, "--no-prospectus", help="跳过招股书"),
+    no_auto_fetch: bool = typer.Option(False, "--no-auto-fetch", help="禁用同花顺自动拉取招股书"),
+    fetch_prefer: str = typer.Option("PHIP", "--fetch-prefer", help="自动拉取优先标题关键词: PHIP/Application/Prospectus"),
 ) -> None:
     """对单个 IPO 项目跑完整深度分析。"""
     _setup_logging()
@@ -46,7 +49,21 @@ def analyze(
         console.print("[red]ANTHROPIC_API_KEY 未设置，请先配置 .env[/red]")
         raise typer.Exit(code=1)
 
-    pdf_arg = None if no_prospectus else (pdf or _try_default_pdf(ticker))
+    pdf_arg: Path | None = None
+    if not no_prospectus:
+        pdf_arg = pdf or _try_default_pdf(ticker)
+        if pdf_arg is None and not no_auto_fetch:
+            ths = THSClient()
+            if ths.configured:
+                console.print(f"[cyan]本地未找到招股书，尝试通过同花顺拉取 {ticker} ...[/cyan]")
+                pdf_arg = ths.auto_fetch_prospectus(ticker, prefer=fetch_prefer)
+                if pdf_arg:
+                    console.print(f"[green]✓ 招股书已下载: {pdf_arg}[/green]")
+                else:
+                    console.print("[yellow]同花顺未返回可用招股书，将在无 RAG 模式下运行[/yellow]")
+            else:
+                console.print("[yellow]THS_REFRESH_TOKEN 未配置，跳过自动获取招股书[/yellow]")
+
     if pdf_arg and not Path(pdf_arg).exists():
         console.print(f"[yellow]招股书 PDF 不存在: {pdf_arg}，将跳过 RAG[/yellow]")
         pdf_arg = None
@@ -82,6 +99,55 @@ def show_config() -> None:
     """打印当前配置。"""
     s = get_settings()
     console.print(s.model_dump())
+
+
+@app.command()
+def fetch_prospectus(
+    ticker: str = typer.Option(..., "--ticker", "-t", help="港股代码"),
+    prefer: str = typer.Option("PHIP", "--prefer"),
+    out: Path | None = typer.Option(None, "--out", help="保存路径，不传则用默认目录"),
+) -> None:
+    """仅通过同花顺拉取招股书 PDF（独立命令，方便调试）。"""
+    _setup_logging()
+    ths = THSClient()
+    if not ths.configured:
+        console.print("[red]THS_REFRESH_TOKEN 未配置[/red]")
+        raise typer.Exit(code=1)
+    p = ths.auto_fetch_prospectus(ticker, dest_dir=out.parent if out else None, prefer=prefer)
+    if p is None:
+        console.print(f"[red]✗ 未能获取 {ticker} 的招股书[/red]")
+        raise typer.Exit(code=2)
+    console.print(f"[green]✓ {p}[/green]")
+
+
+@app.command()
+def list_announcements(
+    ticker: str = typer.Option(..., "--ticker", "-t"),
+    start: str = typer.Option("2023-01-01", "--start"),
+    end: str | None = typer.Option(None, "--end"),
+    keyword: str | None = typer.Option(None, "--keyword"),
+) -> None:
+    """列出某 ticker 的公告（用于排查招股书匹配问题）。"""
+    _setup_logging()
+    ths = THSClient()
+    if not ths.configured:
+        console.print("[red]THS_REFRESH_TOKEN 未配置[/red]")
+        raise typer.Exit(code=1)
+    code = ticker if "." in ticker else f"{ticker.zfill(5)}.HK"
+    fp: dict = {"startDate": start}
+    if end:
+        fp["endDate"] = end
+    if keyword:
+        fp["keyword"] = keyword
+    rows = ths.query_reports(codes=code, function_params=fp)
+    if not rows:
+        console.print("[yellow](无返回)[/yellow]")
+        return
+    for r in rows:
+        date = r.get("declareDate") or r.get("DECLAREDATE") or r.get("publishTime") or ""
+        title = r.get("title") or r.get("TITLE") or ""
+        url = r.get("pdfURL") or r.get("PDFURL") or ""
+        console.print(f"{date}  {title}\n  → {url}")
 
 
 if __name__ == "__main__":

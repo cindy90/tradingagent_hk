@@ -143,28 +143,70 @@ cp .env.example .env
 # 编辑 .env 至少填入 ANTHROPIC_API_KEY
 ```
 
-### 同花顺 iFinD 接入（可选）
+### 同花顺 iFinD QuantAPI 接入
 
-iFinD Python SDK 需单独安装（见同花顺官网）。安装后在 `.env` 填入 `THS_USER` 和 `THS_PASSWORD`，
-`src/data/ths_client.py` 会自动加载。当前接入点（招股书下载 / 行业研报 / 宏观指标）为骨架，
-按 SDK 实际接口编码补充即可。
+直接用 HTTP REST API，不需要装 SDK。在 `.env` 填入：
 
-未配置 THS 时系统自动回退到 akshare 公开数据。
+```
+THS_REFRESH_TOKEN=<你的 refresh_token>
+```
+
+**接入的接口：**
+- `get_access_token` / `update_access_token` — token 自动管理（带本地缓存 + 401 自动刷新）
+- `report_query` — 公告查询，支持按代码 / 类型 / 日期 / 关键词筛选
+- 招股书 PDF 自动下载到 `data/prospectus/<ticker>.pdf`
+
+**自动获取招股书的流程：**
+
+```
+执行 analyze --ticker 09999 时：
+  1) 检查 data/prospectus/09999.pdf 是否存在 → 有则直接用
+  2) 调用 THS report_query 拉公告流（默认 2023-01-01 至今）
+  3) 用标题关键词过滤（"聆讯后资料集" / "招股章程" / "Prospectus" / "PHIP" 等）
+  4) 按 prefer 偏好排序（默认 PHIP 优先）
+  5) 下载 pdfURL 到本地，落入 RAG 索引
+失败时自动 fallback 到无 RAG 模式（依然能跑大部分 Agent）。
+```
+
+辅助命令（用于排查匹配问题）：
+
+```bash
+# 仅拉招股书
+python cli.py fetch-prospectus --ticker 09999
+
+# 列出某 ticker 的所有公告（看标题，调整关键词）
+python cli.py list-announcements --ticker 09999 --start 2024-01-01
+
+# 关键词过滤（直接传给同花顺 functionpara）
+python cli.py list-announcements --ticker 09999 --keyword 招股
+```
+
+**未配置 THS 时**：系统自动跳过 THS，回退到本地 PDF 或 akshare 公开数据。
 
 ---
 
 ## 五、使用
 
 ```bash
-# 把招股书放到 data/prospectus/<ticker>.pdf 或用 --pdf 指定路径
+# 推荐用法：配置了 THS_REFRESH_TOKEN 后，招股书会自动从同花顺拉取
 python cli.py analyze \
     --ticker 09999 \
     --name "示例科技集团" \
-    --industry "AI/SaaS" \
+    --industry "AI/SaaS"
+
+# 手动指定招股书 PDF
+python cli.py analyze --ticker 09999 --name "示例" --industry "TMT" \
     --pdf data/prospectus/09999.pdf
 
-# 跳过招股书快速测试（仅跑非 RAG 依赖的 Agent）
+# 禁用自动拉取（仅用本地缓存）
+python cli.py analyze --ticker 09999 --name "示例" --industry "TMT" --no-auto-fetch
+
+# 跳过招股书快速测试
 python cli.py analyze --ticker 09999 --name "示例" --industry "TMT" --no-prospectus
+
+# 调试用：仅拉招股书 / 列公告
+python cli.py fetch-prospectus --ticker 09999
+python cli.py list-announcements --ticker 09999 --start 2024-01-01
 
 # 查看当前配置
 python cli.py show-config
@@ -200,7 +242,8 @@ python cli.py show-config
 
 ## 七、当前阶段的 TODO
 
-- [ ] 同花顺 iFinD SDK 接口完整接入（招股书 URL、行业研报、宏观指标）
+- [x] 同花顺 QuantAPI 接入：token 管理、`report_query`、招股书 PDF 自动下载
+- [ ] 同花顺 `THS_BD` / `THS_DR` / `THS_EDB` 接入：行业基础信息、行业研报、宏观指标
 - [ ] 港交所披露易爬虫实现
 - [ ] akshare 港股财务接口字段在不同版本的兼容（当前已做容错）
 - [ ] 中文 embedding 模型替换（默认 MiniLM 中文一般，可换 BGE-zh）
