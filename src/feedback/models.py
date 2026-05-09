@@ -202,6 +202,20 @@ class Prediction(BaseModel):
     weighted_total_score: float | None = None
     weighted_to_recommendation_mapping: str = ""
 
+    # 上市档案核心字段（v5: 用于 calibration priors 三维查询）
+    listing_chapter: str = Field(
+        default="Unknown",
+        description="HKEX 上市规则章节 (Main_Board_Standard / 18A / 18C / 19C / "
+        "Secondary_Listing / Dual_Primary_AH / GEM / Unknown)",
+    )
+    size_tier: str = Field(
+        default="Unknown",
+        description="规模档 (Small / Mid / Large / Mega / Unknown)",
+    )
+    industry_theme: str = Field(default="Other", description="行业主题大类")
+    has_wvr: bool = False
+    has_a_share_listed: bool = False
+
     # 可复现性元信息
     model_provider: str
     model_tier_models: dict[str, str] = Field(default_factory=dict)

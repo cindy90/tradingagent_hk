@@ -51,6 +51,12 @@ CREATE TABLE IF NOT EXISTS predictions (
     weighted_total_score REAL,
     weighted_to_recommendation_mapping TEXT,
 
+    listing_chapter TEXT DEFAULT 'Unknown',
+    size_tier TEXT DEFAULT 'Unknown',
+    industry_theme TEXT DEFAULT 'Other',
+    has_wvr INTEGER DEFAULT 0,
+    has_a_share_listed INTEGER DEFAULT 0,
+
     model_provider TEXT,
     model_tier_models_json TEXT,
     total_input_tokens INTEGER DEFAULT 0,
@@ -181,6 +187,11 @@ class FeedbackStore:
             ("decision_weights_json", "TEXT"),
             ("weighted_total_score", "REAL"),
             ("weighted_to_recommendation_mapping", "TEXT"),
+            ("listing_chapter", "TEXT DEFAULT 'Unknown'"),
+            ("size_tier", "TEXT DEFAULT 'Unknown'"),
+            ("industry_theme", "TEXT DEFAULT 'Other'"),
+            ("has_wvr", "INTEGER DEFAULT 0"),
+            ("has_a_share_listed", "INTEGER DEFAULT 0"),
         ]:
             if col not in existing_pred_cols:
                 try:
@@ -340,30 +351,23 @@ class FeedbackStore:
         industry: str,
         recommendation: str | None = None,
         *,
+        listing_chapter: str | None = None,
+        size_tier: str | None = None,
         min_samples: int = 5,
         max_samples: int = 30,
     ) -> dict[str, Any]:
         """聚合历史 closed prediction 的权重校准建议, 给新项目当 prior。
 
-        逻辑:
-          1. JOIN predictions × scores, 取 (industry 模糊匹配)
-             AND (recommendation 一致 / 或全部) AND (有 weight_calibrations)
-          2. 解析 scores.weight_calibrations_json, 按 factor 分组
-          3. 对每个 factor 算: avg(suggested_weight - actual_weight_used) → 平均偏差
-          4. 样本量 < min_samples 时返回 {"sample_size": N, "calibrations": []} (不阻断, 只是不注入)
+        三维度匹配（v2: 加 listing_chapter + size_tier）:
+          1. industry 模糊匹配 (LIKE 核心关键词)
+          2. listing_chapter 严格匹配 (例 18A 项目不混用主板项目的 calibration)
+          3. size_tier 严格匹配 (Small/Mid/Large/Mega 不混)
+          4. recommendation 可选过滤
 
-        Returns:
-          {
-            "sample_size": N,                  # 命中样本数
-            "industry_filter": industry,
-            "recommendation_filter": recommendation,
-            "calibrations": [
-              {"factor": "业务质量", "avg_delta": -0.08, "samples": 6,
-               "min_delta": -0.15, "max_delta": 0.02,
-               "rationale_examples": ["...", "..."]},
-              ...
-            ]
-          }
+        若指定 listing_chapter / size_tier 但样本不足, 自动逐级 fallback:
+          (industry + chapter + size) → (industry + chapter) → (industry) → 空
+
+        Returns: {"sample_size": N, "match_level": "...", "calibrations": [...]}
         """
         # 模糊行业匹配 - 取核心 2-3 字
         industry_keywords = self._derive_industry_keywords(industry)
@@ -375,25 +379,73 @@ class FeedbackStore:
         like_clauses = " OR ".join(["p.industry LIKE ?"] * len(industry_keywords))
         like_args = [f"%{k}%" for k in industry_keywords]
 
-        sql = f"""
-            SELECT p.industry, p.recommendation, s.weight_calibrations_json
-            FROM scores s
-            JOIN predictions p ON p.id = s.prediction_id
-            WHERE ({like_clauses})
-              AND s.weight_calibrations_json IS NOT NULL
-              AND s.weight_calibrations_json != '[]'
-        """
-        args = list(like_args)
-        if recommendation:
-            sql += " AND p.recommendation = ?"
-            args.append(recommendation)
-        sql += " ORDER BY s.score_date DESC LIMIT ?"
-        args.append(max_samples)
+        # 三维度 fallback (最严格 → 最宽), 第一个命中样本数 ≥ min_samples 的层即采用
+        fallback_levels: list[tuple[str, list[str], list[Any]]] = []
+        # Level 1: industry + listing_chapter + size_tier
+        if listing_chapter and size_tier and listing_chapter != "Unknown" and size_tier != "Unknown":
+            fallback_levels.append((
+                "industry+chapter+size_tier",
+                [f"({like_clauses})", "p.listing_chapter = ?", "p.size_tier = ?"],
+                like_args + [listing_chapter, size_tier],
+            ))
+        # Level 2: industry + listing_chapter
+        if listing_chapter and listing_chapter != "Unknown":
+            fallback_levels.append((
+                "industry+chapter",
+                [f"({like_clauses})", "p.listing_chapter = ?"],
+                like_args + [listing_chapter],
+            ))
+        # Level 3: industry + size_tier
+        if size_tier and size_tier != "Unknown":
+            fallback_levels.append((
+                "industry+size_tier",
+                [f"({like_clauses})", "p.size_tier = ?"],
+                like_args + [size_tier],
+            ))
+        # Level 4: industry only
+        fallback_levels.append((
+            "industry",
+            [f"({like_clauses})"],
+            list(like_args),
+        ))
 
-        rows = self._conn.execute(sql, args).fetchall()
+        rows: list = []
+        match_level = "industry"
+        for level_name, where_parts, level_args in fallback_levels:
+            full_args = list(level_args)
+            where_clause = " AND ".join(where_parts)
+            sql = f"""
+                SELECT p.industry, p.recommendation, p.listing_chapter, p.size_tier,
+                       s.weight_calibrations_json
+                FROM scores s
+                JOIN predictions p ON p.id = s.prediction_id
+                WHERE {where_clause}
+                  AND s.weight_calibrations_json IS NOT NULL
+                  AND s.weight_calibrations_json != '[]'
+            """
+            if recommendation:
+                sql += " AND p.recommendation = ?"
+                full_args.append(recommendation)
+            sql += " ORDER BY s.score_date DESC LIMIT ?"
+            full_args.append(max_samples)
+            try:
+                rows = self._conn.execute(sql, full_args).fetchall()
+            except sqlite3.OperationalError:
+                # 老 DB 无 listing_chapter / size_tier 列, 跳过该层级
+                continue
+            if rows and len(rows) >= min_samples:
+                match_level = level_name
+                break
+            elif rows and len(rows) > 0 and level_name == fallback_levels[-1][0]:
+                # 最后一层有数据但 < min_samples, 仍记录
+                match_level = level_name
+                break
+
         if not rows:
             return {"sample_size": 0, "calibrations": [],
-                    "industry_filter": industry, "recommendation_filter": recommendation}
+                    "industry_filter": industry, "recommendation_filter": recommendation,
+                    "listing_chapter_filter": listing_chapter, "size_tier_filter": size_tier,
+                    "match_level": "no_match"}
 
         # 按 factor 聚合
         from collections import defaultdict
@@ -432,8 +484,11 @@ class FeedbackStore:
             return {
                 "sample_size": n_samples, "calibrations": [],
                 "industry_filter": industry, "recommendation_filter": recommendation,
+                "listing_chapter_filter": listing_chapter, "size_tier_filter": size_tier,
+                "match_level": match_level,
                 "min_samples_required": min_samples,
-                "note": f"历史样本 {n_samples} < 最低门槛 {min_samples}, 不注入校准",
+                "note": f"历史样本 {n_samples} < 最低门槛 {min_samples} "
+                f"(命中层级: {match_level}), 不注入校准",
             }
 
         # 聚合每个 factor 的平均偏差 + min/max + rationale 示例
@@ -458,6 +513,9 @@ class FeedbackStore:
             "sample_size": n_samples,
             "industry_filter": industry,
             "recommendation_filter": recommendation,
+            "listing_chapter_filter": listing_chapter,
+            "size_tier_filter": size_tier,
+            "match_level": match_level,
             "calibrations": calibrations,
         }
 

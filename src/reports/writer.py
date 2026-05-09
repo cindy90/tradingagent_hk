@@ -96,6 +96,36 @@ def _render_exit_plan(e) -> str:
     )
 
 
+def _render_listing_profile_md(profile) -> str:
+    """渲染 ListingProfile 为 markdown 卡片 (顶部展示给读者快速看到上市规则上下文)。"""
+    if profile is None:
+        return ""
+    rows = [
+        f"| 上市规则章节 | **{getattr(profile, 'listing_chapter', '—')}** |",
+        f"| 盈利阶段 | {getattr(profile, 'profitability_stage', '—')} |",
+        f"| 规模档 | {getattr(profile, 'size_tier', '—')} |",
+        f"| 行业主题 | {getattr(profile, 'industry_theme', '—')} |",
+    ]
+    if getattr(profile, "has_wvr", False):
+        rows.append("| 同股不同权 (WVR) | 是 |")
+    if getattr(profile, "has_a_share_listed", False):
+        a_ticker = getattr(profile, "a_share_ticker", "")
+        rows.append(f"| A 股已上市 | 是 (代码 {a_ticker or '未知'}) |")
+    if getattr(profile, "is_concept_stock", False):
+        rows.append("| 中概股 | 是 |")
+    main_market = getattr(profile, "main_listing_market", "")
+    if main_market:
+        rows.append(f"| 主上市地 (二次上市) | {main_market} |")
+    rows.append(f"| 档案推断置信度 | {getattr(profile, 'detection_confidence', '默认值')} |")
+
+    return (
+        "## 0. 上市档案 (Listing Profile)\n\n"
+        "| 维度 | 值 |\n|---|---|\n"
+        + "\n".join(rows)
+        + "\n\n_决定下游 Agent 的差异化处理: 估值方法选择 / 决策因子权重区间 / 风险维度增补_\n"
+    )
+
+
 def _render_decision_weights(
     factors: list,
     total: float | None,
@@ -219,6 +249,12 @@ def write_final_summary(ctx: AgentContext, *, also_html: bool = True) -> Path:
         f"### `{name}`\n\n{brief}" for name, brief in ctx.briefs.items()
     )
 
+    # 上市档案
+    profile_md = ""
+    profile = getattr(ctx.extras, "listing_profile", None)
+    if profile is not None and getattr(profile, "listing_chapter", "Unknown") != "Unknown":
+        profile_md = _render_listing_profile_md(profile)
+
     md = f"""# 基石投资决策备忘录 (IC Memo)
 
 - 项目：**{ctx.company_name}** ({ctx.ticker})
@@ -226,6 +262,8 @@ def write_final_summary(ctx: AgentContext, *, also_html: bool = True) -> Path:
 - 项目 ID：`{ctx.project_id}`
 
 ---
+
+{profile_md}
 
 {exec_md}
 

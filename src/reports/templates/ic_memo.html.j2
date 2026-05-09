@@ -470,6 +470,36 @@ footer code { background: var(--neutral-bg); padding: 1px 4px; border-radius: 2p
   </div>
 </div>
 
+<!-- 0. LISTING PROFILE (only if known) -->
+{% set profile = ctx.extras.listing_profile if ctx.extras.listing_profile else None %}
+{% if profile and profile.listing_chapter and profile.listing_chapter != 'Unknown' %}
+<section class="chapter">
+  <h2>0. 上市档案 (Listing Profile)</h2>
+  <table class="exec-table">
+    <tr><th>上市规则章节</th><td><strong>{{ profile.listing_chapter }}</strong></td></tr>
+    <tr><th>盈利阶段</th><td>{{ profile.profitability_stage }}</td></tr>
+    <tr><th>规模档</th><td>{{ profile.size_tier }}</td></tr>
+    <tr><th>行业主题</th><td>{{ profile.industry_theme }}</td></tr>
+    {% if profile.has_wvr %}
+    <tr><th>同股不同权 (WVR)</th><td><strong style="color: var(--orange);">是</strong></td></tr>
+    {% endif %}
+    {% if profile.has_a_share_listed %}
+    <tr><th>A 股已上市</th><td>是（代码 {{ profile.a_share_ticker or '未知' }}）</td></tr>
+    {% endif %}
+    {% if profile.is_concept_stock %}
+    <tr><th>中概股</th><td>是</td></tr>
+    {% endif %}
+    {% if profile.main_listing_market %}
+    <tr><th>主上市地（二次上市）</th><td>{{ profile.main_listing_market }}</td></tr>
+    {% endif %}
+    <tr><th>档案推断置信度</th><td class="muted">{{ profile.detection_confidence }}</td></tr>
+  </table>
+  <p class="note">
+    决定下游 Agent 的差异化处理: 估值方法选择 / 决策因子权重区间 / 风险维度增补
+  </p>
+</section>
+{% endif %}
+
 <!-- I. EXECUTIVE SUMMARY -->
 <section class="chapter">
   <h2>I. 投决摘要</h2>

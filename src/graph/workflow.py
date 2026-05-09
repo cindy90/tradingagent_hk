@@ -584,6 +584,13 @@ def rerun_steps(
     return ctx
 
 
+def _safe_attr(obj: Any, name: str, default: Any) -> Any:
+    """安全读 obj.name, obj 为 None 或没有该属性时返默认值。"""
+    if obj is None:
+        return default
+    return getattr(obj, name, default)
+
+
 def persist_prediction(ctx: AgentContext, llm: LLMClient) -> int | None:
     """把 ctx 里的决议结果落到 feedback DB，返回 prediction id。
 
@@ -644,6 +651,12 @@ def persist_prediction(ctx: AgentContext, llm: LLMClient) -> int | None:
         weighted_to_recommendation_mapping=str(
             decision.get("weighted_to_recommendation_mapping", "") or ""
         ),
+        # v5 ListingProfile 核心字段, 用于 calibration priors 三维查询
+        listing_chapter=_safe_attr(ctx.extras.listing_profile, "listing_chapter", "Unknown"),
+        size_tier=_safe_attr(ctx.extras.listing_profile, "size_tier", "Unknown"),
+        industry_theme=_safe_attr(ctx.extras.listing_profile, "industry_theme", "Other"),
+        has_wvr=bool(_safe_attr(ctx.extras.listing_profile, "has_wvr", False)),
+        has_a_share_listed=bool(_safe_attr(ctx.extras.listing_profile, "has_a_share_listed", False)),
         agent_score_cards=score_cards,
         model_provider=s.llm_provider,
         model_tier_models=tier_to_model,
@@ -1051,17 +1064,29 @@ class CornerstoneWorkflow:
         """从历史 closed predictions 的 PostmortemAgent 输出聚合权重校准 priors,
         注入 ctx.extras.weight_priors. Decision Agent prompt 会按需渲染。
 
+        v5: 三维度匹配 (industry + listing_chapter + size_tier), 自动 fallback。
         样本量 < min_samples 时不注入 (避免小样本误导)。
         """
         try:
             from src.feedback import FeedbackStore
         except ImportError:
             return
+        # 从 ctx.extras.listing_profile 抽 chapter / size_tier
+        profile = getattr(ctx.extras, "listing_profile", None)
+        chapter = _safe_attr(profile, "listing_chapter", None)
+        size_t = _safe_attr(profile, "size_tier", None)
+        if chapter == "Unknown":
+            chapter = None
+        if size_t == "Unknown":
+            size_t = None
+
         store = FeedbackStore()
         try:
             priors = store.get_weight_calibration_priors(
                 industry=ctx.industry,
-                recommendation=None,  # 当前还没决议, 不按 recommendation 过滤
+                recommendation=None,
+                listing_chapter=chapter,
+                size_tier=size_t,
                 min_samples=min_samples,
             )
         finally:

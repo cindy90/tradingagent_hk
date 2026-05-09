@@ -2375,3 +2375,384 @@ def test_postmortem_prompt_includes_decision_weights() -> None:
     md = _render_decision_weights_for_postmortem(p)
     assert "业务质量" in md
     assert "20%" in md
+
+
+# ============================================================================
+# ListingProfile 差异化（18A/18C/AH/WVR/规模档）测试
+# ============================================================================
+
+def test_listing_profile_18a_recommends_rnpv() -> None:
+    from src.agents.listing_profile import (
+        ListingProfile, recommended_valuation_methods, extra_risk_dimensions,
+    )
+    p = ListingProfile(
+        listing_chapter="Main_Board_18A", industry_theme="Bio_Pharma",
+        profitability_stage="Pre_Commercial", size_tier="Mid",
+    )
+    methods = recommended_valuation_methods(p)
+    primary_str = " ".join(methods["primary"])
+    assert "rNPV" in primary_str
+    assert "PE" in methods["forbidden"]
+
+    risks = extra_risk_dimensions(p)
+    risk_dims = [r["dimension"] for r in risks]
+    assert any("临床" in d for d in risk_dims)
+
+
+def test_listing_profile_18c_pre_commercial_uses_dcf() -> None:
+    from src.agents.listing_profile import ListingProfile, recommended_valuation_methods
+
+    p = ListingProfile(
+        listing_chapter="Main_Board_18C", profitability_stage="Pre_Commercial",
+    )
+    methods = recommended_valuation_methods(p)
+    assert "DCF" in " ".join(methods["primary"])
+    assert "PE" in methods["forbidden"]
+
+
+def test_listing_profile_ah_uses_a_share_anchor() -> None:
+    from src.agents.listing_profile import ListingProfile, recommended_valuation_methods, extra_risk_dimensions
+
+    p = ListingProfile(
+        listing_chapter="Dual_Primary_AH", has_a_share_listed=True, a_share_ticker="688256",
+    )
+    methods = recommended_valuation_methods(p)
+    assert "A-H" in " ".join(methods["primary"])
+
+    risks = extra_risk_dimensions(p)
+    assert any("A-H" in r["dimension"] or "折价" in r["dimension"] for r in risks)
+
+
+def test_listing_profile_wvr_adds_governance_risk() -> None:
+    from src.agents.listing_profile import ListingProfile, extra_risk_dimensions, adjusted_weight_ranges
+
+    p = ListingProfile(has_wvr=True)
+    risks = extra_risk_dimensions(p)
+    risk_dims = [r["dimension"] for r in risks]
+    assert any("投票权" in d for d in risk_dims)
+
+    # 风控权重应被上调
+    weights = adjusted_weight_ranges(p)
+    risk_factor = next(w for w in weights if w["factor"] == "风控等级")
+    assert any("WVR" in adj or "投票权" in adj or "+5pp" in adj
+               for adj in risk_factor.get("profile_adjustments", []))
+
+
+def test_listing_profile_small_cap_boosts_liquidity_weight() -> None:
+    from src.agents.listing_profile import ListingProfile, adjusted_weight_ranges
+
+    p = ListingProfile(size_tier="Small")
+    weights = adjusted_weight_ranges(p)
+    sentiment = next(w for w in weights if w["factor"] == "情绪与流动性")
+    new_low, new_up = sentiment["suggested_weight_range"]
+    # 原 0.05-0.15, +5~10pp → 应至少 0.10+
+    assert new_low >= 0.10
+
+
+def test_listing_profile_18a_adjusts_business_quality_up() -> None:
+    """18A + Bio_Pharma 业务质量权重应上调到 30-45% (基础 15-30 + 18A +10 + Bio +5)."""
+    from src.agents.listing_profile import ListingProfile, adjusted_weight_ranges
+
+    p = ListingProfile(listing_chapter="Main_Board_18A", industry_theme="Bio_Pharma")
+    weights = adjusted_weight_ranges(p)
+    biz = next(w for w in weights if w["factor"] == "业务质量")
+    new_low, new_up = biz["suggested_weight_range"]
+    assert new_low >= 0.25 and new_up >= 0.40
+
+
+def test_listing_profile_render_includes_all_sections() -> None:
+    from src.agents.listing_profile import ListingProfile, render_profile_for_prompt
+
+    p = ListingProfile(
+        listing_chapter="Main_Board_18A", profitability_stage="Pre_Commercial",
+        size_tier="Mid", industry_theme="Bio_Pharma",
+    )
+    md = render_profile_for_prompt(p)
+    assert "上市档案" in md
+    assert "推荐估值方法" in md
+    assert "rNPV" in md
+    assert "权重区间调整" in md
+    assert "应额外纳入风控评估的风险维度" in md
+    assert "临床" in md  # 18A 风险
+
+    # Unknown 时返空
+    assert render_profile_for_prompt(ListingProfile()) == ""
+
+
+def test_listing_profile_detector_parses_json() -> None:
+    from src.agents.listing_profile_detector import _parse_profile_json
+
+    text = """前置文字...
+
+```json
+{
+  "listing_chapter": "Main_Board_18A",
+  "profitability_stage": "Pre_Commercial",
+  "industry_theme": "Bio_Pharma",
+  "has_wvr": false,
+  "has_a_share_listed": false,
+  "a_share_ticker": "",
+  "is_concept_stock": false,
+  "main_listing_market": "",
+  "detection_evidence": ["P.45: '本公司为第 18A 章未盈利生物科技公司'"]
+}
+```
+"""
+    out = _parse_profile_json(text)
+    assert out is not None
+    assert out["listing_chapter"] == "Main_Board_18A"
+    assert out["industry_theme"] == "Bio_Pharma"
+    assert out["has_wvr"] is False
+    assert len(out["detection_evidence"]) == 1
+
+
+def test_listing_profile_detector_drops_invalid_fields() -> None:
+    from src.agents.listing_profile_detector import _parse_profile_json
+
+    text = '```json\n{"listing_chapter": "Main_Board_18A", "has_wvr": "yes"}\n```'
+    out = _parse_profile_json(text)
+    assert out["listing_chapter"] == "Main_Board_18A"
+    # has_wvr 非 bool 应被丢弃
+    assert "has_wvr" not in out
+
+
+def test_predictions_persist_listing_profile_columns(tmp_path) -> None:
+    """save_prediction 写入 + get_prediction 读出 listing_chapter / size_tier 等列."""
+    from datetime import datetime
+    from src.feedback import FeedbackStore
+    from src.feedback.models import Prediction
+
+    s = FeedbackStore(db_path=tmp_path / "test.sqlite")
+    p = Prediction(
+        project_id="lp_test", ticker="X", company_name="测试", industry="Bio",
+        decision_date=datetime.now(),
+        recommendation="审慎参与", confidence="中",
+        valuation_mid=80, anchor_method="rNPV", ipo_pricing_view="合理",
+        suggested_amount_low_usd_m=10, suggested_amount_high_usd_m=20,
+        listing_chapter="Main_Board_18A",
+        size_tier="Mid",
+        industry_theme="Bio_Pharma",
+        has_wvr=True,
+        has_a_share_listed=False,
+        model_provider="kimi",
+    )
+    pid = s.save_prediction(p)
+    fetched = s.get_prediction(pid)
+    assert fetched is not None
+    assert fetched.listing_chapter == "Main_Board_18A"
+    assert fetched.size_tier == "Mid"
+    assert fetched.has_wvr is True
+
+
+def test_priors_3dim_query_chapter_match(tmp_path) -> None:
+    """3 维查询: industry + chapter + size_tier 严格匹配, 18A 项目不混用主板项目."""
+    from datetime import datetime
+    from src.feedback import FeedbackStore
+    from src.feedback.models import Prediction, Score, WeightCalibration
+
+    s = FeedbackStore(db_path=tmp_path / "test.sqlite")
+    # 5 个 18A + 5 个主板, 全部 Bio 行业 / Mid 规模
+    for i in range(10):
+        chapter = "Main_Board_18A" if i < 5 else "Main_Board_Standard"
+        p = Prediction(
+            project_id=f"p{i}", ticker=str(i), company_name=f"x{i}",
+            industry="生物医药", decision_date=datetime.now(),
+            recommendation="认购", confidence="中",
+            valuation_mid=80, anchor_method="x", ipo_pricing_view="合理",
+            suggested_amount_low_usd_m=10, suggested_amount_high_usd_m=20,
+            listing_chapter=chapter, size_tier="Mid",
+            model_provider="kimi",
+        )
+        pid = s.save_prediction(p)
+        sc = Score(prediction_id=pid, score_date=datetime.now(),
+                   recommendation_score=-0.2,
+                   weight_calibrations=[
+                       WeightCalibration(factor="业务质量", actual_weight_used=0.20,
+                                         suggested_weight=0.30 if chapter == "Main_Board_18A" else 0.15,
+                                         rationale=f"p{i} {chapter}"),
+                   ])
+        s.save_score(sc)
+
+    # 18A 严格匹配应只命中 5 个 18A 项目, avg_delta = +0.10 (上调)
+    out = s.get_weight_calibration_priors(
+        industry="生物医药", listing_chapter="Main_Board_18A", size_tier="Mid",
+        min_samples=3,
+    )
+    assert "industry+chapter+size_tier" in out["match_level"]
+    assert out["sample_size"] == 5
+    biz = next(c for c in out["calibrations"] if c["factor"] == "业务质量")
+    assert abs(biz["avg_delta"] - 0.10) < 0.001  # 18A 项目都+10pp
+
+    # 主板严格匹配, avg_delta = -0.05 (下调)
+    out2 = s.get_weight_calibration_priors(
+        industry="生物医药", listing_chapter="Main_Board_Standard", size_tier="Mid",
+        min_samples=3,
+    )
+    biz2 = next(c for c in out2["calibrations"] if c["factor"] == "业务质量")
+    assert abs(biz2["avg_delta"] - (-0.05)) < 0.001
+
+
+def test_priors_3dim_query_fallback_on_no_match(tmp_path) -> None:
+    """3 维查询: 严格匹配 0 命中时, fallback 到 industry only."""
+    from datetime import datetime
+    from src.feedback import FeedbackStore
+    from src.feedback.models import Prediction, Score, WeightCalibration
+
+    s = FeedbackStore(db_path=tmp_path / "test.sqlite")
+    # 5 个机器人项目都是 Mid + 18C
+    for i in range(5):
+        p = Prediction(
+            project_id=f"p{i}", ticker=str(i), company_name=f"x{i}",
+            industry="机器人", decision_date=datetime.now(),
+            recommendation="认购", confidence="中",
+            valuation_mid=80, anchor_method="PS", ipo_pricing_view="合理",
+            suggested_amount_low_usd_m=10, suggested_amount_high_usd_m=20,
+            listing_chapter="Main_Board_18C", size_tier="Mid",
+            model_provider="kimi",
+        )
+        pid = s.save_prediction(p)
+        sc = Score(prediction_id=pid, score_date=datetime.now(),
+                   recommendation_score=-0.2,
+                   weight_calibrations=[
+                       WeightCalibration(factor="业务质量", actual_weight_used=0.20,
+                                         suggested_weight=0.25, rationale="x"),
+                   ])
+        s.save_score(sc)
+
+    # 严格查 18A + Small 应 0 命中, fallback 到 industry only (5 个 18C 项目)
+    out = s.get_weight_calibration_priors(
+        industry="机器人", listing_chapter="Main_Board_18A", size_tier="Small",
+        min_samples=3,
+    )
+    assert out["sample_size"] == 5  # fallback 找到 industry only
+    assert "industry" in out["match_level"]
+    # 但 match_level 不应是最严格的 industry+chapter+size_tier
+    assert out["match_level"] != "industry+chapter+size_tier"
+
+
+def test_workflow_build_listing_profile_explicit_overrides_detector(tmp_path) -> None:
+    """workflow._build_listing_profile: 显式 CLI 参数应覆盖 detector 推断."""
+    from pathlib import Path
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.agents.listing_profile import ListingProfile
+    from src.graph.workflow import CornerstoneWorkflow
+
+    class _Mock:
+        def complete(self, **kw):
+            from src.llm.client import LLMResponse
+            return LLMResponse(text="x", input_tokens=1, output_tokens=1, model="x")
+
+    from src.llm import LLMClient
+    llm = LLMClient(provider=_Mock(), provider_name="m")
+    wf = CornerstoneWorkflow.__new__(CornerstoneWorkflow)
+    wf.llm = llm
+
+    ctx = AgentContext(
+        project_id="t", ticker="X", company_name="测试",
+        industry="生物医药", reports_dir=tmp_path, rag=None, extras=WorkflowExtras(),
+    )
+
+    # 显式给 18A + Mid + has_wvr
+    wf._build_listing_profile(
+        ctx,
+        explicit={"listing_chapter": "Main_Board_18A", "size_tier": "Mid",
+                  "has_wvr": True, "industry_theme": "Bio_Pharma"},
+        use_detector=False,
+    )
+    p = ctx.extras.listing_profile
+    assert p.listing_chapter == "Main_Board_18A"
+    assert p.size_tier == "Mid"
+    assert p.has_wvr is True
+    assert p.industry_theme == "Bio_Pharma"
+    assert p.detection_confidence == "显式确认"
+
+
+def test_workflow_build_listing_profile_default_unknown(tmp_path) -> None:
+    """无显式 + 无 RAG 时应 fallback 到 Unknown 而非崩溃."""
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.graph.workflow import CornerstoneWorkflow
+    from src.llm import LLMClient
+    from src.llm.client import LLMResponse
+
+    class _Mock:
+        def complete(self, **kw):
+            return LLMResponse(text="x", input_tokens=1, output_tokens=1, model="x")
+
+    llm = LLMClient(provider=_Mock(), provider_name="m")
+    wf = CornerstoneWorkflow.__new__(CornerstoneWorkflow)
+    wf.llm = llm
+    ctx = AgentContext(
+        project_id="t", ticker="X", company_name="测试",
+        industry="未知行业", reports_dir=tmp_path, rag=None, extras=WorkflowExtras(),
+    )
+    wf._build_listing_profile(ctx, explicit=None, use_detector=False)
+    p = ctx.extras.listing_profile
+    assert p.listing_chapter == "Unknown"
+
+
+def test_html_renders_listing_profile_section(tmp_path) -> None:
+    """HTML 渲染 0. 上市档案章节."""
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.agents.listing_profile import ListingProfile
+    from src.reports.html_writer import write_ic_memo_html
+
+    extras = WorkflowExtras()
+    extras.decision_json = {
+        "recommendation": "审慎参与", "confidence": "中",
+        "valuation_range_hkd_billion": {"mid": 80, "anchor_method": "rNPV", "anchor_logic": "x"},
+        "ipo_pricing_view": "合理",
+        "suggested_amount_usd_million": [10, 20],
+        "key_supports": ["x"], "key_risks": ["y"],
+    }
+    extras.listing_profile = ListingProfile(
+        listing_chapter="Main_Board_18A",
+        profitability_stage="Pre_Commercial",
+        size_tier="Mid",
+        industry_theme="Bio_Pharma",
+        has_wvr=True,
+    )
+    ctx = AgentContext(
+        project_id="lp_html", ticker="X", company_name="测试",
+        industry="生物医药", reports_dir=tmp_path, rag=None, extras=extras,
+    )
+    out = write_ic_memo_html(ctx)
+    text = out.read_text(encoding="utf-8")
+    assert "上市档案" in text
+    assert "Main_Board_18A" in text
+    assert "Pre_Commercial" in text
+    assert "Bio_Pharma" in text
+    # WVR 标志应出现
+    assert "WVR" in text or "同股不同权" in text
+
+
+def test_md_renders_listing_profile_section(tmp_path) -> None:
+    """Markdown 渲染 0. 上市档案章节."""
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.agents.listing_profile import ListingProfile
+    from src.reports.writer import write_final_summary
+
+    extras = WorkflowExtras()
+    extras.decision_json = {
+        "recommendation": "认购", "confidence": "高",
+        "valuation_range_hkd_billion": {"mid": 80, "anchor_method": "PE", "anchor_logic": "x"},
+        "ipo_pricing_view": "合理",
+        "suggested_amount_usd_million": [10, 20],
+        "key_supports": ["x"], "key_risks": ["y"],
+    }
+    extras.listing_profile = ListingProfile(
+        listing_chapter="Main_Board_18C", size_tier="Large",
+        industry_theme="Robotics_Automation",
+    )
+    ctx = AgentContext(
+        project_id="lp_md", ticker="X", company_name="测试",
+        industry="工业机器人", reports_dir=tmp_path, rag=None, extras=extras,
+    )
+    out = write_final_summary(ctx, also_html=False)
+    text = out.read_text(encoding="utf-8")
+    assert "上市档案" in text
+    assert "Main_Board_18C" in text
+    assert "Robotics_Automation" in text
