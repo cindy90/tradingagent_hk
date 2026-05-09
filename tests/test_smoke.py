@@ -170,6 +170,60 @@ def test_workflow_extras_typed_access() -> None:
     assert ex.misc["custom_field"] == "hello"
 
 
+def test_select_cached_blocks_picks_key_sections() -> None:
+    from src.data.prospectus import ProspectusChunk
+    from src.graph.workflow import select_cached_blocks
+
+    chunks = [
+        ProspectusChunk(chunk_id="1", text="封面 cover", page_start=1, page_end=1, section="封面"),
+        ProspectusChunk(chunk_id="2", text="目录 toc", page_start=2, page_end=3, section="目录"),
+        ProspectusChunk(chunk_id="3", text="承销商列表", page_start=4, page_end=4, section="承销商"),
+        ProspectusChunk(chunk_id="4", text="本招股书概要内容...", page_start=5, page_end=20, section="概要"),
+        ProspectusChunk(chunk_id="5", text="风险因素详细列举...", page_start=21, page_end=40, section="风险因素"),
+        ProspectusChunk(chunk_id="6", text="业务模式与产品线...", page_start=41, page_end=80, section="业务"),
+        ProspectusChunk(chunk_id="7", text="财务三表...", page_start=81, page_end=100, section="财务资料"),
+    ]
+    selected = select_cached_blocks(chunks)
+    # 关键章节应被命中，封面/目录/承销商应被跳过
+    joined = "\n".join(selected)
+    assert "概要" in joined
+    assert "风险因素" in joined
+    assert "业务" in joined
+    assert "封面" not in joined
+    assert "目录" not in joined
+
+
+def test_select_cached_blocks_falls_back_when_no_match() -> None:
+    """关键章节都没识别出来时退化为前 3 块。"""
+    from src.data.prospectus import ProspectusChunk
+    from src.graph.workflow import select_cached_blocks
+
+    chunks = [
+        ProspectusChunk(chunk_id=str(i), text=f"chunk{i}", page_start=i, page_end=i,
+                        section="无章节标题")
+        for i in range(1, 6)
+    ]
+    selected = select_cached_blocks(chunks)
+    assert len(selected) == 3
+    assert selected[0] == "chunk1"
+
+
+def test_select_cached_blocks_respects_size_caps() -> None:
+    from src.data.prospectus import ProspectusChunk
+    from src.graph.workflow import select_cached_blocks
+
+    long_text = "x" * 10000
+    chunks = [
+        ProspectusChunk(chunk_id="1", text=long_text, page_start=1, page_end=1, section="概要"),
+        ProspectusChunk(chunk_id="2", text=long_text, page_start=2, page_end=2, section="风险因素"),
+        ProspectusChunk(chunk_id="3", text=long_text, page_start=3, page_end=3, section="业务"),
+    ]
+    selected = select_cached_blocks(chunks, max_chars_per_block=2000, max_total_chars=5000)
+    for s in selected:
+        assert len(s) <= 2000
+    assert sum(len(s) for s in selected) <= 5000
+
+
 def test_decision_schema_validation_passes_on_complete_json() -> None:
     from src.agents.decision import validate_decision
 

@@ -34,10 +34,68 @@ from src.agents.sentiment import SentimentAgent
 from src.agents.summarizer import Summarizer
 from src.agents.tech_trend import TechTrendAgent
 from src.agents.extras import WorkflowExtras
-from src.data.prospectus import ProspectusLoader
+from src.data.prospectus import ProspectusChunk, ProspectusLoader
 from src.data.rag import ProspectusRAG
 from src.data.ths_client import THSClient
 from src.llm import LLMClient
+
+# 高信息密度章节关键词（按优先级排序）。命中后作为 cached_system_blocks 内容，
+# 跨 Agent 复用 prompt cache，且每个 Agent 都白拿这些核心上下文。
+KEY_CACHED_SECTIONS = [
+    "概要",       # 招股书第一章，浓缩全文
+    "风险因素",
+    "业务",
+    "募集资金用途",
+    "募资",
+    "财务资料",
+    "管理层讨论",
+    "RISK FACTORS",
+    "BUSINESS",
+    "USE OF PROCEEDS",
+]
+
+
+def select_cached_blocks(
+    chunks: list[ProspectusChunk],
+    *,
+    max_blocks: int = 4,
+    max_chars_per_block: int = 6000,
+    max_total_chars: int = 20000,
+) -> list[str]:
+    """从切块中挑选关键章节文本作为 prompt cache 内容。
+
+    匹配规则:
+      1) chunk.section 包含 KEY_CACHED_SECTIONS 关键词
+      2) 同一 section 只取第一块（避免重复）
+      3) 总字符数 < max_total_chars
+      4) 没有命中关键词时退化为前 3 块（保留原行为）
+    """
+    selected: list[str] = []
+    seen_sections: set[str] = set()
+    total = 0
+
+    for kw in KEY_CACHED_SECTIONS:
+        for c in chunks:
+            sec = (c.section or "").strip()
+            if not sec or sec in seen_sections:
+                continue
+            if kw not in sec:
+                continue
+            text = c.text[:max_chars_per_block]
+            if total + len(text) > max_total_chars:
+                break
+            selected.append(text)
+            seen_sections.add(sec)
+            total += len(text)
+            break  # 每个关键词只取一块
+        if len(selected) >= max_blocks or total >= max_total_chars:
+            break
+
+    if not selected:
+        # fallback: 前 3 块（保留旧行为，避免完全没 cache）
+        selected = [c.text[:max_chars_per_block] for c in chunks[:3]]
+
+    return selected
 
 
 class CornerstoneWorkflow:
@@ -121,10 +179,13 @@ class CornerstoneWorkflow:
                 chunks = ProspectusLoader(pdf_path).load_chunks()
                 rag = ProspectusRAG(project_id=project_id)
                 rag.index(chunks)
-                # 选择招股书最关键的 2-3 个章节作为缓存块（概要 + 风险因素）
-                # 这里用启发式：取前 5 块文本作为静态缓存内容。
-                head_blocks = [c.text for c in chunks[:3]]
-                cached_blocks = ["\n\n".join(head_blocks)] if head_blocks else []
+                # 按章节关键词挑选高信息密度章节作为 prompt cache 内容
+                selected = select_cached_blocks(chunks)
+                cached_blocks = ["\n\n---\n\n".join(selected)] if selected else []
+                logger.info(
+                    f"cached_blocks: {len(selected)} 个关键章节 / "
+                    f"{sum(len(s) for s in selected)} 字符"
+                )
             else:
                 logger.warning(f"招股书 PDF 不存在: {pdf_path}")
 
