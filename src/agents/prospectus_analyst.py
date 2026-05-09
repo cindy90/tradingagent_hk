@@ -180,12 +180,23 @@ class ProspectusAnalystAgent(BaseAgent):
             if lines:
                 basic_block = "# 公司基础信息（同花顺）\n" + "\n".join(lines) + "\n\n"
 
+        # ListingProfile 注入: 让 prospectus_analyst 知道项目的上市规则上下文
+        profile_block = ""
+        try:
+            from src.agents.listing_profile import render_profile_for_prompt
+            profile_block = render_profile_for_prompt(
+                getattr(ctx.extras, "listing_profile", None)
+            )
+        except Exception:
+            pass
+
         user_msg = (
             f"# 待分析公司\n"
             f"- 名称：{ctx.company_name}\n"
             f"- 拟上市代码：{ctx.ticker}\n"
             f"- 所属行业：{ctx.industry}\n\n"
             f"{basic_block}"
+            f"{profile_block}"
             f"# 招股书检索证据\n\n{evidence}\n\n"
             f"请基于以上证据生成完整的招股书深度分析报告。"
         )

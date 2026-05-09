@@ -755,15 +755,29 @@ class DecisionAgent(BaseAgent):
         weight_priors_block = _render_weight_priors_for_prompt(
             ctx.extras.weight_priors if hasattr(ctx.extras, "weight_priors") else {}
         )
+        # ListingProfile 注入（决定调权 / 估值方法 / 风险维度的硬约束）
+        profile_block = ""
+        try:
+            from src.agents.listing_profile import render_profile_for_prompt
+            profile_block = render_profile_for_prompt(
+                getattr(ctx.extras, "listing_profile", None)
+            )
+        except Exception:
+            pass
 
         user_msg = (
             f"# 待决策项目\n"
             f"- 公司：{ctx.company_name} ({ctx.ticker})\n"
             f"- 行业：{ctx.industry}\n"
             f"- 项目 ID：{ctx.project_id}\n\n"
+            f"{profile_block}"
             f"{weight_priors_block}"
             f"# 各 Agent 简报\n\n{briefs_text}\n\n"
-            f"请按系统指令的格式输出最终基石投资决策。"
+            f"请按系统指令的格式输出最终基石投资决策。\n\n"
+            f"**重要**: 如果上方有 # 上市档案 块, 你的 decision_weights 权重必须在该档案"
+            f"调整后的区间内, 估值方法必须采纳推荐主用方法 (禁用清单内的方法不能出现在"
+            f"valuation_range_hkd_billion.methodology_breakdown), 风险评估必须覆盖"
+            f"额外风险维度。"
         )
 
         resp = self.llm.complete(

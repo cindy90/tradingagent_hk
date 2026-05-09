@@ -251,8 +251,19 @@ class ComparableAgent(TemplateAgent):
         quotes_md = _render_quotes_md(ctx.extras.peer_recent_quotes)
         offering_block = self._extract_offering_block(ctx)
 
+        # ListingProfile 注入: 强约束估值方法
+        profile_block = ""
+        try:
+            from src.agents.listing_profile import render_profile_for_prompt
+            profile_block = render_profile_for_prompt(
+                getattr(ctx.extras, "listing_profile", None)
+            )
+        except Exception:
+            pass
+
         return (
             f"# 项目\n{ctx.company_name} ({ctx.ticker})\n{target_status_note}\n"
+            f"{profile_block}"
             f"# 权威可比公司清单（PeerSuggester + 投决人确认）\n{peers_md}\n\n"
             f"# 招股书「全球发售」章节抽取（用于第四节「招股价区间对比」）\n"
             f"{offering_block}\n\n"
@@ -261,5 +272,8 @@ class ComparableAgent(TemplateAgent):
             f"# 可比公司近期行情（来自 iFinD THS_HQ）\n{quotes_md}\n\n"
             f"# PE 估值结果（基于上方 PE 倍数）\n{pe_val if pe_val else '（无 PE 输入或 target 净利为 0/亏损）'}\n\n"
             f"# PS 估值结果（基于上方 PS 倍数）\n{ps_val if ps_val else '（无 PS 输入或 target 营收为 0）'}\n\n"
-            f"请输出可比公司估值分析。"
+            f"请输出可比公司估值分析。\n\n"
+            f"**重要**: 如果上方有 # 上市档案 块, 你的 methodology_breakdown 必须使用其推荐的"
+            f"主用估值方法 (例如 18A 必须用 rNPV / Peak Sales; AH 双重必须用 A-H 折价锚定)。"
+            f"禁用清单中的方法不允许出现, 否则视为违反 profile 约束。"
         )

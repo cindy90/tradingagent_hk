@@ -108,8 +108,21 @@ class RiskAgent(TemplateAgent):
             "prospectus_analyst", "industry", "macro", "comparable",
             "tech_trend", "sentiment", "fact_check", "debate_manager",
         ]
+        profile_block = ""
+        try:
+            from src.agents.listing_profile import render_profile_for_prompt
+            profile_block = render_profile_for_prompt(
+                getattr(ctx.extras, "listing_profile", None)
+            )
+        except Exception:
+            pass
+
         return (
             f"# 项目\n{ctx.company_name} ({ctx.ticker})\n\n"
+            f"{profile_block}"
             f"# 全部研究简报与辩论裁决\n{briefs_context(ctx, upstream)}\n\n"
-            f"请输出风控独立评估。"
+            f"请输出风控独立评估。\n\n"
+            f"**重要**: 如果上方有 # 上市档案 块, 你的 risk_dimensions 必须**显式覆盖**"
+            f"其'应额外纳入风控评估的风险维度'章节中列出的每一项 (例如 18A 必须评估"
+            f"临床失败风险, AH 双重必须评估 A-H 折价收敛风险)。"
         )
