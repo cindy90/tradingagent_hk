@@ -24,7 +24,7 @@ def _render_executive_summary(d: dict) -> str:
     anchor = val.get("anchor_method", "—")
 
     return (
-        f"## ⭐ Executive Summary\n\n"
+        f"## I. 投决摘要\n\n"
         f"| 字段 | 值 |\n"
         f"|---|---|\n"
         f"| **建议** | **{rec}** |\n"
@@ -163,47 +163,47 @@ def write_final_summary(ctx: AgentContext, *, also_html: bool = True) -> Path:
 
 ---
 
-## 一、关键支持论点
+## II.A 关键支持论点
 
 {supports_md}
 
-## 二、核心风险
+## II.B 核心风险
 
 {risks_md}
 
-## 三、敏感性分析（三档情景）⭐
+## III. 敏感性分析（三档情景）
 
 {sensitivity_md}
 
-## 四、对冲策略 ⭐
+## IV.A 对冲策略
 
 {hedging_md}
 
-## 五、退出策略 ⭐
+## IV.B 退出策略
 
 {exit_md}
 
-## 六、Kill Switches（认购后退出触发）⭐
+## V. Kill Switches（认购后退出触发）
 
 {kill_md}
 
-## 七、监控 KPI
+## VI. 监控 KPI
 
 {monitor_md}
 
-## 八、硬性认购条件 (Deal Conditions)
+## VII. 硬性认购条件 (Deal Conditions)
 
 {conditions_md}
 
 ---
 
-## 九、决议全文
+## VIII. 决议全文
 
 {ctx.full_reports.get("decision", "（决策报告缺失）")}
 
 ---
 
-## 十、各环节简报合集
+## IX. 各环节简报合集
 
 {brief_section}
 

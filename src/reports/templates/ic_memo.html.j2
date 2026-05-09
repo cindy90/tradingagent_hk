@@ -1,10 +1,14 @@
-{# IC Memo HTML 模板 - 投行级别视觉
+{# IC Memo HTML 模板 - 真投行 IC memo 干货风格
 
 设计原则:
-- 完全自包含 (内联 CSS, 0 外部依赖, 单文件可发邮件)
-- 浅色背景, 数据驱动, 视觉层次清晰
-- 颜色编码: 推荐 (绿/黄/橙/红) / 风险 (红橙黄绿) / 情景 (悲观红/基准灰/乐观绿)
-- 移动端友好 (响应式 + 表格滚动)
+- 信息密度优先，去掉 emoji 装饰
+- 参考 GS / MS / 中金 实际 IC memo 的视觉:
+  * 单色调（灰阶 + 极少 accent 色）
+  * 表格密度高
+  * 章节用罗马数字 / 大写
+  * 关键数字粗体而非彩色
+  * 颜色仅用于"关键状态指示"（推荐档/情景/严重度），不滥用
+- 完全自包含 (内联 CSS, 0 外部依赖)
 #}<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -13,519 +17,514 @@
 <title>IC Memo · {{ ctx.company_name }} ({{ ctx.ticker }})</title>
 <style>
 :root {
-  --bg: #fafafa;
-  --card-bg: #ffffff;
-  --border: #e5e7eb;
-  --text: #1f2937;
+  --bg: #ffffff;
+  --paper: #ffffff;
+  --border: #d1d5db;
+  --border-light: #e5e7eb;
+  --text: #111827;
+  --text-secondary: #374151;
   --text-muted: #6b7280;
-  --accent: #1e40af;
-  --green: #10b981;
-  --yellow: #f59e0b;
-  --orange: #f97316;
-  --red: #ef4444;
-  --bear: #fee2e2;
-  --base: #f3f4f6;
-  --bull: #d1fae5;
+  --accent: #1e3a5f;
+  --accent-light: #f1f5f9;
+  --green: #059669;
+  --green-bg: #ecfdf5;
+  --red: #b91c1c;
+  --red-bg: #fef2f2;
+  --orange: #b45309;
+  --orange-bg: #fff7ed;
+  --yellow: #a16207;
+  --yellow-bg: #fefce8;
+  --neutral: #6b7280;
+  --neutral-bg: #f3f4f6;
 }
 * { box-sizing: border-box; }
 body {
-  margin: 0; padding: 0;
+  margin: 0;
   background: var(--bg);
-  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
-  font-size: 14px;
-  line-height: 1.65;
+  font-family: "Source Han Serif SC", "Noto Serif CJK SC", Georgia, "PingFang SC",
+               "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 13px;
+  line-height: 1.7;
   color: var(--text);
 }
-.container { max-width: 1100px; margin: 0 auto; padding: 32px 28px; }
+.container { max-width: 980px; margin: 0 auto; padding: 36px 32px 60px; }
 
-/* Header */
-.header {
-  background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%);
-  color: white;
-  padding: 36px 32px;
-  border-radius: 12px;
-  margin-bottom: 24px;
-  box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+/* Header — 简洁分隔条 */
+.doc-header {
+  border-bottom: 2px solid var(--text);
+  padding-bottom: 16px;
+  margin-bottom: 28px;
 }
-.header h1 { margin: 0 0 8px 0; font-size: 24px; font-weight: 600; }
-.header .meta { font-size: 13px; opacity: 0.9; }
-.header .meta span { margin-right: 16px; }
+.doc-header .doc-type {
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.doc-header h1 {
+  margin: 0 0 6px 0;
+  font-size: 20px;
+  font-weight: 600;
+  font-family: "Source Han Sans SC", "Noto Sans CJK SC", -apple-system, sans-serif;
+}
+.doc-header .meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: -apple-system, sans-serif;
+}
+.doc-header .meta span { margin-right: 18px; }
 
-/* Cards */
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 20px 24px;
-  margin-bottom: 18px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+/* 章节 */
+section.chapter {
+  margin: 28px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-light);
 }
-.card h2 {
-  margin: 0 0 14px 0;
-  font-size: 17px;
+section.chapter:first-of-type { border-top: none; padding-top: 0; }
+h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 12px 0;
   color: var(--accent);
-  border-bottom: 2px solid var(--border);
-  padding-bottom: 8px;
+  font-family: "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
 }
-.card h3 { font-size: 15px; margin: 18px 0 8px; }
+h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 16px 0 6px 0;
+  color: var(--text-secondary);
+}
 
-/* Executive Summary 大卡片 */
-.exec-summary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 16px;
-  margin-bottom: 24px;
-}
-.exec-cell {
-  background: var(--card-bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 16px 18px;
-  border-left: 4px solid var(--accent);
-}
-.exec-cell .label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
-.exec-cell .value { font-size: 22px; font-weight: 600; margin-top: 4px; color: var(--text); }
-.exec-cell.recommend-认购     { border-left-color: var(--green); }
-.exec-cell.recommend-审慎参与 { border-left-color: var(--yellow); }
-.exec-cell.recommend-观望     { border-left-color: var(--orange); }
-.exec-cell.recommend-不认购   { border-left-color: var(--red); }
-.exec-cell.recommend-认购 .value     { color: var(--green); }
-.exec-cell.recommend-审慎参与 .value { color: var(--yellow); }
-.exec-cell.recommend-观望 .value     { color: var(--orange); }
-.exec-cell.recommend-不认购 .value   { color: var(--red); }
-
-/* Tables */
-table {
+/* Executive Summary — 单表格紧凑展示 */
+table.exec-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
-  margin: 8px 0;
+  margin-bottom: 16px;
 }
-th, td {
-  padding: 9px 12px;
+table.exec-table tr { border-bottom: 1px solid var(--border-light); }
+table.exec-table th {
   text-align: left;
-  border-bottom: 1px solid var(--border);
-}
-th {
-  background: #f9fafb;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text-muted);
-  text-transform: uppercase;
-  font-size: 11px;
-  letter-spacing: 0.5px;
+  padding: 8px 16px 8px 0;
+  width: 130px;
+  vertical-align: top;
 }
-tr:hover td { background: #fafbfc; }
-
-/* 敏感性表格颜色编码 */
-tr.scenario-悲观 td { background: var(--bear); }
-tr.scenario-基准 td { background: var(--base); }
-tr.scenario-乐观 td { background: var(--bull); }
-
-/* Kill switch alert */
-.kill-switch {
-  display: flex;
-  align-items: flex-start;
-  padding: 12px 16px;
-  margin: 8px 0;
-  border-left: 4px solid;
-  border-radius: 6px;
-  background: #fff7ed;
+table.exec-table td {
+  padding: 8px 0;
+  font-weight: 500;
 }
-.kill-switch.severity-高 { border-left-color: var(--red); background: #fef2f2; }
-.kill-switch.severity-中 { border-left-color: var(--orange); background: #fff7ed; }
-.kill-switch.severity-低 { border-left-color: var(--yellow); background: #fefce8; }
-.kill-switch .ks-icon { font-size: 18px; margin-right: 12px; flex-shrink: 0; }
-.kill-switch .ks-body { flex: 1; }
-.kill-switch .ks-trigger { font-weight: 600; margin-bottom: 4px; }
-.kill-switch .ks-action { color: var(--text-muted); font-size: 13px; }
-.kill-switch .ks-severity {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 11px;
+table.exec-table td.highlight {
+  font-size: 16px;
   font-weight: 600;
-  margin-left: 8px;
 }
-.kill-switch.severity-高 .ks-severity { background: var(--red); color: white; }
-.kill-switch.severity-中 .ks-severity { background: var(--orange); color: white; }
-.kill-switch.severity-低 .ks-severity { background: var(--yellow); color: white; }
+table.exec-table td.highlight.rec-认购     { color: var(--green); }
+table.exec-table td.highlight.rec-审慎参与 { color: var(--orange); }
+table.exec-table td.highlight.rec-观望     { color: var(--neutral); }
+table.exec-table td.highlight.rec-不认购   { color: var(--red); }
 
-/* List items */
-.bullet-list { list-style: none; padding: 0; margin: 8px 0; }
-.bullet-list li {
-  padding: 8px 0 8px 24px;
+/* 普通表格 */
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin: 8px 0;
+}
+table.data th, table.data td {
+  padding: 7px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-light);
+  vertical-align: top;
+}
+table.data thead th {
+  background: var(--neutral-bg);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  border-bottom: 2px solid var(--border);
+}
+table.data tbody tr:hover td { background: var(--accent-light); }
+
+/* 敏感性 — 仅左边色条标识情景 */
+tr.scenario-悲观 td:first-child { border-left: 3px solid var(--red); padding-left: 8px; }
+tr.scenario-基准 td:first-child { border-left: 3px solid var(--neutral); padding-left: 8px; }
+tr.scenario-乐观 td:first-child { border-left: 3px solid var(--green); padding-left: 8px; }
+
+/* 列表 */
+ul.tight {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0;
+}
+ul.tight li {
+  padding: 4px 0 4px 20px;
   position: relative;
-  border-bottom: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border-light);
+  font-size: 13px;
 }
-.bullet-list li:last-child { border-bottom: none; }
-.bullet-list li::before {
-  content: "▸";
+ul.tight li:last-child { border-bottom: none; }
+ul.tight li::before {
+  content: "—";
   position: absolute;
-  left: 4px;
-  color: var(--accent);
-  font-weight: bold;
+  left: 0;
+  color: var(--text-muted);
 }
-.bullet-list.support li::before { color: var(--green); }
-.bullet-list.risk li::before    { color: var(--red); content: "⚠"; }
-.bullet-list.condition li::before { color: var(--orange); content: "✦"; }
 
-/* Hedging / Exit cards */
-.duo-grid {
+/* Two-column blocks */
+.two-col {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: 28px;
+  margin: 8px 0;
 }
-@media (max-width: 700px) {
-  .duo-grid { grid-template-columns: 1fr; }
-}
-.mini-card {
-  background: #f9fafb;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 14px 16px;
-}
-.mini-card h4 { margin: 0 0 8px 0; font-size: 14px; color: var(--accent); }
-.mini-card dl { margin: 0; }
-.mini-card dt { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
-.mini-card dd { margin: 2px 0 0 0; font-weight: 500; }
+@media (max-width: 720px) { .two-col { grid-template-columns: 1fr; } }
 
-/* Probability bar */
-.prob-bar {
+/* Kill switches — 表格化, 不用 alert box */
+table.kill-switches td.severity {
+  font-weight: 600;
+  width: 50px;
+}
+table.kill-switches td.severity.severity-高 { color: var(--red); }
+table.kill-switches td.severity.severity-中 { color: var(--orange); }
+table.kill-switches td.severity.severity-低 { color: var(--yellow); }
+
+/* Reasoning chain */
+.reasoning-step {
+  border-left: 2px solid var(--border);
+  padding: 4px 0 4px 14px;
+  margin: 14px 0;
+}
+.reasoning-step .rs-num {
   display: inline-block;
-  width: 60px;
-  height: 8px;
-  background: var(--border);
-  border-radius: 4px;
-  overflow: hidden;
-  vertical-align: middle;
-  margin-right: 6px;
-}
-.prob-bar > span { display: block; height: 100%; background: var(--accent); }
-
-/* Brief sections (collapsible) */
-details.brief-section {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  margin: 10px 0;
-  background: #fafafa;
-}
-details.brief-section > summary {
-  cursor: pointer;
-  padding: 12px 16px;
   font-weight: 600;
   color: var(--accent);
-  user-select: none;
+  margin-right: 6px;
+  font-family: -apple-system, sans-serif;
 }
-details.brief-section[open] > summary { border-bottom: 1px solid var(--border); }
-details.brief-section .brief-body { padding: 14px 16px; font-size: 13px; line-height: 1.7; }
-details.brief-section .brief-body p { margin: 6px 0; }
-
-/* Footer */
-.footer {
-  text-align: center;
-  font-size: 11px;
-  color: var(--text-muted);
-  padding: 32px 0 16px;
-  border-top: 1px solid var(--border);
-  margin-top: 32px;
-}
-.footer code { background: var(--base); padding: 2px 6px; border-radius: 3px; }
-
-/* Reasoning chain - 推理链专章 */
-.reasoning-chain { counter-reset: rstep; }
-.reasoning-step {
-  background: var(--card-bg);
-  border: 1px solid var(--border);
-  border-left: 4px solid var(--accent);
-  border-radius: 6px;
-  padding: 14px 18px;
-  margin: 10px 0;
-  position: relative;
-  counter-increment: rstep;
-}
-.reasoning-step::before {
-  content: counter(rstep);
-  position: absolute;
-  left: -16px;
-  top: 16px;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: white;
-  text-align: center;
-  line-height: 28px;
+.reasoning-step .rs-title {
   font-weight: 600;
-  font-size: 13px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+  font-size: 13.5px;
+  margin-bottom: 6px;
 }
-.reasoning-step .rs-title { font-weight: 600; font-size: 15px; color: var(--accent); margin-bottom: 8px; }
-.reasoning-step .rs-grid {
-  display: grid;
-  grid-template-columns: 80px 1fr;
-  gap: 6px 12px;
-  font-size: 13px;
-}
-.reasoning-step .rs-grid .rs-label { color: var(--text-muted); font-weight: 500; }
 .reasoning-step .rs-conf {
   display: inline-block;
-  padding: 1px 8px;
-  border-radius: 10px;
-  font-size: 11px;
-  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 2px;
+  font-size: 10.5px;
+  font-weight: 500;
   margin-left: 8px;
+  font-family: -apple-system, sans-serif;
+  letter-spacing: 0.3px;
 }
-.reasoning-step .rs-conf.conf-高 { background: var(--bull); color: var(--green); }
-.reasoning-step .rs-conf.conf-中 { background: var(--base); color: var(--text-muted); }
-.reasoning-step .rs-conf.conf-低 { background: var(--bear); color: var(--red); }
+.reasoning-step .rs-conf.conf-高 { background: var(--green-bg); color: var(--green); border: 1px solid var(--green); }
+.reasoning-step .rs-conf.conf-中 { background: var(--neutral-bg); color: var(--neutral); border: 1px solid var(--border); }
+.reasoning-step .rs-conf.conf-低 { background: var(--red-bg); color: var(--red); border: 1px solid var(--red); }
+.reasoning-step dl {
+  margin: 4px 0 0 0;
+  font-size: 12.5px;
+}
+.reasoning-step dt {
+  display: inline-block;
+  width: 80px;
+  font-weight: 500;
+  color: var(--text-muted);
+  vertical-align: top;
+  font-size: 12px;
+}
+.reasoning-step dd {
+  display: inline-block;
+  width: calc(100% - 90px);
+  margin: 0 0 4px 0;
+  vertical-align: top;
+}
+.reasoning-step dd code,
+.reasoning-step dd .calc {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  background: var(--neutral-bg);
+  padding: 1px 5px;
+  border-radius: 2px;
+}
 .reasoning-step .rs-caveats {
   font-size: 12px;
-  color: var(--text-muted);
-  background: #fff7ed;
-  padding: 6px 10px;
-  border-radius: 4px;
+  color: var(--orange);
   margin-top: 8px;
-  border-left: 3px solid var(--orange);
+  padding: 6px 10px;
+  background: var(--orange-bg);
+  border-left: 2px solid var(--orange);
+  font-style: italic;
 }
 
 /* 估值方法分拆 */
-.method-card {
-  background: var(--card-bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 12px 16px;
-  margin: 8px 0;
-}
-.method-card .method-head {
-  display: flex;
-  justify-content: space-between;
+.method-row {
+  display: grid;
+  grid-template-columns: 70px 1fr 90px 50px;
   align-items: center;
-  margin-bottom: 6px;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-light);
+  font-size: 12.5px;
 }
-.method-card .method-name {
-  font-weight: 600;
-  color: var(--accent);
-  font-size: 14px;
-}
-.method-card .method-result {
-  font-weight: 600;
-  font-size: 16px;
-  color: var(--text);
-}
-.method-card .method-weight {
-  font-size: 11px;
-  color: var(--text-muted);
-  background: var(--base);
-  padding: 2px 6px;
-  border-radius: 10px;
-  margin-left: 6px;
-}
-.method-card dl { margin: 6px 0 0 0; font-size: 12px; }
-.method-card dt { color: var(--text-muted); margin-top: 4px; }
-.method-card dd { margin: 1px 0 0 0; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+.method-row:last-child { border-bottom: none; }
+.method-row .m-name { font-weight: 600; color: var(--accent); }
+.method-row .m-detail dt { display: inline-block; width: 70px; color: var(--text-muted); font-size: 11.5px; }
+.method-row .m-detail dd { display: inline-block; margin: 0; font-size: 12px; }
+.method-row .m-detail .formula { font-family: ui-monospace, monospace; font-size: 11.5px; }
+.method-row .m-result { font-weight: 600; text-align: right; }
+.method-row .m-weight { font-size: 11px; color: var(--text-muted); text-align: right; }
 
-/* Hover 数字带 tooltip */
+/* 假设清单 */
+ol.assumptions {
+  padding-left: 24px;
+  margin: 8px 0;
+  font-size: 13px;
+}
+ol.assumptions li {
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--border-light);
+}
+
+/* Tooltip on figures */
 .fig-with-rationale {
-  position: relative;
   cursor: help;
-  border-bottom: 1px dotted var(--accent);
+  border-bottom: 1px dotted var(--text-muted);
+  position: relative;
 }
 .fig-with-rationale:hover::after {
   content: attr(data-rationale);
   position: absolute;
-  bottom: 100%;
+  bottom: calc(100% + 4px);
   left: 0;
   background: var(--text);
   color: white;
-  padding: 8px 12px;
-  border-radius: 6px;
-  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 3px;
+  font-size: 11.5px;
   white-space: pre-wrap;
   width: max-content;
-  max-width: 360px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  max-width: 380px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.15);
   z-index: 100;
-  margin-bottom: 4px;
   font-weight: normal;
+  line-height: 1.5;
+  font-family: "Source Han Sans SC", sans-serif;
 }
 
-/* 关键假设清单 */
-.assumption-list { padding: 0; margin: 8px 0; list-style: none; }
-.assumption-list li {
-  padding: 10px 14px 10px 38px;
-  background: #fefce8;
-  border: 1px solid #fef3c7;
-  border-radius: 6px;
-  margin: 6px 0;
-  font-size: 13px;
-  position: relative;
-}
-.assumption-list li::before {
-  content: "💡";
-  position: absolute;
-  left: 12px;
-  top: 10px;
-}
-
-/* Decision narrative section */
+/* 决议正文 */
 .narrative {
-  font-size: 14px;
-  line-height: 1.8;
+  font-size: 13px;
+  line-height: 1.85;
 }
-.narrative h2 { color: var(--accent); margin-top: 24px; }
-.narrative h3 { color: #4b5563; margin-top: 18px; }
+.narrative h2 {
+  font-size: 14px;
+  margin-top: 22px;
+  border-bottom: 1px solid var(--border-light);
+  padding-bottom: 4px;
+}
+.narrative h3 { font-size: 13px; margin-top: 14px; color: var(--text-secondary); }
+.narrative p { margin: 8px 0; }
 .narrative table {
   font-size: 12px;
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+.narrative table th, .narrative table td {
+  padding: 6px 10px;
+  border: 1px solid var(--border-light);
 }
 .narrative blockquote {
-  border-left: 3px solid var(--accent);
-  margin: 12px 0;
-  padding-left: 14px;
+  border-left: 2px solid var(--text-muted);
+  margin: 8px 0;
+  padding: 4px 12px;
   color: var(--text-muted);
+  background: var(--neutral-bg);
 }
 
-/* Print friendly */
+/* Brief 折叠 */
+details.brief {
+  border: 1px solid var(--border-light);
+  border-radius: 3px;
+  margin: 6px 0;
+  font-size: 12.5px;
+}
+details.brief > summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  user-select: none;
+  background: var(--neutral-bg);
+}
+details.brief > summary:hover { background: var(--accent-light); }
+details.brief[open] > summary {
+  border-bottom: 1px solid var(--border-light);
+  color: var(--accent);
+}
+details.brief .brief-body {
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+/* Footer */
+footer {
+  margin-top: 36px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-light);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  font-family: -apple-system, sans-serif;
+}
+footer code { background: var(--neutral-bg); padding: 1px 4px; border-radius: 2px; font-size: 11px; }
+
+/* Print */
 @media print {
   body { background: white; }
-  .card, .header { page-break-inside: avoid; }
-  details.brief-section { page-break-before: avoid; }
-  details.brief-section[open] .brief-body { display: block !important; }
+  .container { padding: 16px; max-width: none; }
+  details.brief[open] .brief-body { display: block !important; }
+  details.brief { page-break-inside: avoid; }
 }
+
+/* 子工具样式 */
+.note { font-size: 11.5px; color: var(--text-muted); font-style: italic; margin: 4px 0; }
+.label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; }
+.muted { color: var(--text-muted); }
 </style>
 </head>
 <body>
 <div class="container">
 
-<!-- ===================== HEADER ===================== -->
-<div class="header">
-  <h1>📋 基石投资决策备忘录 · IC Memo</h1>
+<!-- HEADER -->
+<div class="doc-header">
+  <div class="doc-type">Cornerstone Investment · IC Memo</div>
+  <h1>{{ ctx.company_name }} ({{ ctx.ticker }})</h1>
   <div class="meta">
-    <span><strong>{{ ctx.company_name }}</strong> ({{ ctx.ticker }})</span>
     <span>行业: {{ ctx.industry }}</span>
-    <span>项目 ID: <code>{{ ctx.project_id }}</code></span>
+    <span>项目编号: {{ ctx.project_id }}</span>
+    <span>生成时间: {{ generated_at }}</span>
   </div>
 </div>
 
-<!-- ===================== EXECUTIVE SUMMARY ===================== -->
-<div class="exec-summary">
-  <div class="exec-cell recommend-{{ d.get('recommendation', '观望') }}">
-    <div class="label">最终建议</div>
-    <div class="value">{{ d.get('recommendation', '—') }}</div>
-  </div>
-  <div class="exec-cell">
-    <div class="label">置信度</div>
-    <div class="value">{{ d.get('confidence', '—') }}</div>
-  </div>
-  <div class="exec-cell">
-    <div class="label">定价观点</div>
-    <div class="value" style="font-size: 18px;">{{ d.get('ipo_pricing_view', '—') }}</div>
-  </div>
-  <div class="exec-cell">
-    <div class="label">估值中枢 (亿 HKD)</div>
-    <div class="value">{{ valuation.get('mid', '—') }}</div>
-    <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">
-      {{ valuation.get('low', '—') }} ~ {{ valuation.get('high', '—') }}
-      ({{ valuation.get('anchor_method', '—') }})
+<!-- I. EXECUTIVE SUMMARY -->
+<section class="chapter">
+  <h2>I. 投决摘要</h2>
+  <table class="exec-table">
+    <tr>
+      <th>最终建议</th>
+      <td class="highlight rec-{{ d.get('recommendation', '观望') }}">{{ d.get('recommendation', '—') }}</td>
+    </tr>
+    <tr><th>置信度</th><td>{{ d.get('confidence', '—') }}</td></tr>
+    <tr><th>定价观点</th><td>{{ d.get('ipo_pricing_view', '—') }}</td></tr>
+    <tr>
+      <th>估值区间</th>
+      <td>
+        <strong>{{ valuation.get('mid', '—') }} 亿 HKD</strong>
+        <span class="muted">
+          (区间 {{ valuation.get('low', '—') }} ~ {{ valuation.get('high', '—') }} ·
+          锚定方法: {{ valuation.get('anchor_method', '—') }})
+        </span>
+      </td>
+    </tr>
+    <tr>
+      <th>建议金额</th>
+      <td>
+        {% if amounts and amounts|length >= 2 %}
+          <strong>{{ amounts[0] }} ~ {{ amounts[1] }} M USD</strong>
+        {% else %}—{% endif %}
+      </td>
+    </tr>
+  </table>
+</section>
+
+<!-- II. KEY SUPPORTS / RISKS -->
+<section class="chapter">
+  <div class="two-col">
+    <div>
+      <h2>II.A 关键支持</h2>
+      {% if d.get('key_supports') %}
+      <ul class="tight">
+        {% for s in d.get('key_supports', []) %}<li>{{ s }}</li>{% endfor %}
+      </ul>
+      {% else %}<p class="muted">（无）</p>{% endif %}
+    </div>
+    <div>
+      <h2>II.B 核心风险</h2>
+      {% if d.get('key_risks') %}
+      <ul class="tight">
+        {% for r in d.get('key_risks', []) %}<li>{{ r }}</li>{% endfor %}
+      </ul>
+      {% else %}<p class="muted">（无）</p>{% endif %}
     </div>
   </div>
-  <div class="exec-cell">
-    <div class="label">建议金额 (USD M)</div>
-    <div class="value">
-      {%- if amounts and amounts|length >= 2 -%}
-        {{ amounts[0] }} ~ {{ amounts[1] }}
-      {%- else -%}
-        —
-      {%- endif -%}
-    </div>
-  </div>
-</div>
+</section>
 
-<!-- ===================== KEY SUPPORTS / RISKS ===================== -->
-<div class="duo-grid">
-  <div class="card">
-    <h2>✓ 关键支持</h2>
-    {% if d.get('key_supports') %}
-    <ul class="bullet-list support">
-      {% for s in d.get('key_supports', []) %}<li>{{ s }}</li>{% endfor %}
-    </ul>
-    {% else %}<p style="color: var(--text-muted);">（无）</p>{% endif %}
-  </div>
-  <div class="card">
-    <h2>⚠ 核心风险</h2>
-    {% if d.get('key_risks') %}
-    <ul class="bullet-list risk">
-      {% for r in d.get('key_risks', []) %}<li>{{ r }}</li>{% endfor %}
-    </ul>
-    {% else %}<p style="color: var(--text-muted);">（无）</p>{% endif %}
-  </div>
-</div>
-
-<!-- ===================== KEY ASSUMPTIONS ===================== -->
+<!-- III. KEY ASSUMPTIONS -->
 {% if d.get('key_assumptions') %}
-<div class="card">
-  <h2>💡 关键假设清单（决议依赖的核心前提）</h2>
-  <p style="font-size: 12px; color: var(--text-muted); margin-top: 0;">
-    这些假设任一被颠覆, 决议需重新评估。可作为持续监控的"假设监控表"。
-  </p>
-  <ul class="assumption-list">
+<section class="chapter">
+  <h2>III. 投决依赖的核心假设</h2>
+  <p class="note">下列假设任一被颠覆, 决议需重新评估。可作为持续监控的"假设监控表"。</p>
+  <ol class="assumptions">
     {% for a in d.get('key_assumptions', []) %}<li>{{ a }}</li>{% endfor %}
-  </ul>
-</div>
+  </ol>
+</section>
 {% endif %}
 
-<!-- ===================== VALUATION METHODOLOGY BREAKDOWN ===================== -->
+<!-- IV. VALUATION METHODOLOGY -->
 {% set vm = valuation.get('methodology_breakdown') %}
 {% if vm %}
-<div class="card">
-  <h2>📐 估值方法分拆（每种方法的输入 → 公式 → 输出）</h2>
-  <p style="font-size: 12px; color: var(--text-muted); margin-top: 0;">
-    估值锚定方法: <strong>{{ valuation.get('anchor_method', '—') }}</strong>
-    | 锚定逻辑: {{ valuation.get('anchor_logic', '—') }}
+<section class="chapter">
+  <h2>IV. 估值方法分拆</h2>
+  <p class="note">
+    锚定方法: <strong>{{ valuation.get('anchor_method', '—') }}</strong>
+    {% if valuation.get('anchor_logic') %} · 逻辑: {{ valuation.get('anchor_logic', '') }}{% endif %}
   </p>
-  {% for m in vm %}
-  <div class="method-card">
-    <div class="method-head">
-      <div>
-        <span class="method-name">{{ m.get('method', '—') }}</span>
-        {% if m.get('weight') is not none %}
-          <span class="method-weight">权重 {{ (m.get('weight', 0) * 100) | round(0) | int }}%</span>
-        {% endif %}
+  <div>
+    {% for m in vm %}
+    <div class="method-row">
+      <div class="m-name">{{ m.get('method', '—') }}</div>
+      <div class="m-detail">
+        <dl>
+          <dt>可比基准</dt><dd>{{ m.get('peer_basis', '—') }}</dd><br>
+          <dt>目标指标</dt><dd>{{ m.get('target_metric', '—') }}</dd><br>
+          <dt>计算公式</dt><dd><span class="formula">{{ m.get('formula', '—') }}</span></dd>
+        </dl>
       </div>
-      <div class="method-result">
+      <div class="m-result">
         {% if m.get('result_hkd_b') is not none %}{{ m.get('result_hkd_b') }} 亿 HKD{% else %}—{% endif %}
       </div>
+      <div class="m-weight">
+        {% if m.get('weight') is not none %}权重 {{ (m.get('weight', 0) * 100) | round(0) | int }}%{% endif %}
+      </div>
     </div>
-    <dl>
-      <dt>可比基准</dt><dd>{{ m.get('peer_basis', '—') }}</dd>
-      <dt>目标指标</dt><dd>{{ m.get('target_metric', '—') }}</dd>
-      <dt>计算公式</dt><dd>{{ m.get('formula', '—') }}</dd>
-    </dl>
+    {% endfor %}
   </div>
-  {% endfor %}
   {% if valuation.get('key_assumptions') %}
   <h3>本估值依赖的关键假设</h3>
-  <ul class="assumption-list">
+  <ul class="tight">
     {% for a in valuation.get('key_assumptions', []) %}<li>{{ a }}</li>{% endfor %}
   </ul>
   {% endif %}
-</div>
+</section>
 {% endif %}
 
-<!-- ===================== SENSITIVITY ===================== -->
-<div class="card">
-  <h2>📊 敏感性分析（三档情景）</h2>
-  <p style="font-size: 12px; color: var(--text-muted); margin-top: 0;">
-    💡 鼠标悬停"估值"和"概率"列可查看推算逻辑。
-  </p>
+<!-- V. SENSITIVITY -->
+<section class="chapter">
+  <h2>V. 敏感性分析（三档情景）</h2>
+  <p class="note">"估值"和"概率"列鼠标悬停可查看推算逻辑。</p>
   {% if d.get('sensitivity_table') %}
-  <table>
+  <table class="data">
     <thead>
       <tr>
-        <th>情景</th>
+        <th style="width: 60px;">情景</th>
         <th>触发条件</th>
-        <th>估值 (亿 HKD)</th>
-        <th>概率</th>
-        <th>预期回报</th>
+        <th style="width: 110px;">估值 (亿 HKD)</th>
+        <th style="width: 80px;">概率</th>
+        <th style="width: 90px;">预期回报</th>
       </tr>
     </thead>
     <tbody>
@@ -536,15 +535,14 @@ details.brief-section .brief-body p { margin: 6px 0; }
         <td>
           {% set vd = s.get('valuation_derivation', '') %}
           {% if vd %}
-            <span class="fig-with-rationale" data-rationale="推算逻辑: {{ vd }}">
-              {{ s.get('valuation_hkd_b', '—') }}
+            <span class="fig-with-rationale" data-rationale="推算: {{ vd }}">
+              <strong>{{ s.get('valuation_hkd_b', '—') }}</strong>
             </span>
-          {% else %}{{ s.get('valuation_hkd_b', '—') }}{% endif %}
+          {% else %}<strong>{{ s.get('valuation_hkd_b', '—') }}</strong>{% endif %}
         </td>
         <td>
           {% set p = s.get('probability', 0) %}
           {% set pr = s.get('probability_rationale', '') %}
-          <span class="prob-bar"><span style="width: {{ (p * 100) | int }}%;"></span></span>
           {% if pr %}
             <span class="fig-with-rationale" data-rationale="赋值依据: {{ pr }}">
               {{ (p * 100) | round(0) | int }}%
@@ -563,180 +561,170 @@ details.brief-section .brief-body p { margin: 6px 0; }
     {% endfor %}
     </tbody>
   </table>
-  {% else %}<p style="color: var(--text-muted);">（敏感性分析缺失）</p>{% endif %}
-</div>
+  {% else %}<p class="muted">（敏感性分析缺失）</p>{% endif %}
+</section>
 
-<!-- ===================== REASONING CHAIN ===================== -->
+<!-- VI. REASONING CHAIN -->
 {% if d.get('reasoning_chain') %}
-<div class="card">
-  <h2>🧠 推理链（从假设到结论的完整论证流）</h2>
-  <p style="font-size: 12px; color: var(--text-muted); margin-top: 0;">
-    本份 IC memo 的核心交付物——把每个量化结论 trace 到具体推理步骤。
+<section class="chapter">
+  <h2>VI. 推理链（论证流溯源）</h2>
+  <p class="note">
+    把"从 Agent 简报推到最终建议"的链条显式化, 让每个量化结论可 trace 到具体推理步骤。
   </p>
-  <div class="reasoning-chain" style="padding-left: 20px;">
-    {% for step in d.get('reasoning_chain', []) %}
-    <div class="reasoning-step">
-      <div class="rs-title">
-        {{ step.get('title', '—') }}
-        <span class="rs-conf conf-{{ step.get('confidence', '中') }}">{{ step.get('confidence', '中') }} 置信</span>
-      </div>
-      <div class="rs-grid">
-        {% if step.get('premise') %}<div class="rs-label">前提</div><div>{{ step.get('premise') }}</div>{% endif %}
-        {% if step.get('data_source') %}<div class="rs-label">数据来源</div><div>{{ step.get('data_source') }}</div>{% endif %}
-        {% if step.get('calculation') %}<div class="rs-label">计算</div><div style="font-family: ui-monospace, monospace; font-size: 13px;">{{ step.get('calculation') }}</div>{% endif %}
-        {% if step.get('conclusion') %}<div class="rs-label">结论</div><div><strong>{{ step.get('conclusion') }}</strong></div>{% endif %}
-      </div>
-      {% if step.get('caveats') %}
-        <div class="rs-caveats">
-          ⚠ <strong>异议/依赖:</strong>
-          {% for cv in step.get('caveats', []) %}<br>· {{ cv }}{% endfor %}
-        </div>
-      {% endif %}
+  {% for step in d.get('reasoning_chain', []) %}
+  <div class="reasoning-step">
+    <div class="rs-title">
+      <span class="rs-num">[{{ step.get('step_no', loop.index) }}]</span>
+      {{ step.get('title', '—') }}
+      <span class="rs-conf conf-{{ step.get('confidence', '中') }}">{{ step.get('confidence', '中') }}置信</span>
     </div>
-    {% endfor %}
+    <dl>
+      {% if step.get('premise') %}<dt>前提</dt><dd>{{ step.get('premise') }}</dd><br>{% endif %}
+      {% if step.get('data_source') %}<dt>数据来源</dt><dd>{{ step.get('data_source') }}</dd><br>{% endif %}
+      {% if step.get('calculation') %}<dt>计算</dt><dd><span class="calc">{{ step.get('calculation') }}</span></dd><br>{% endif %}
+      {% if step.get('conclusion') %}<dt>结论</dt><dd><strong>{{ step.get('conclusion') }}</strong></dd>{% endif %}
+    </dl>
+    {% if step.get('caveats') %}
+      <div class="rs-caveats">
+        异议/依赖: {% for cv in step.get('caveats', []) %}{% if not loop.first %}; {% endif %}{{ cv }}{% endfor %}
+      </div>
+    {% endif %}
   </div>
-</div>
+  {% endfor %}
+</section>
 {% endif %}
 
-<!-- ===================== HEDGING + EXIT ===================== -->
-<div class="duo-grid">
-  <div class="card">
-    <h2>🛡 对冲策略</h2>
-    {% if hedging %}
-    <div class="mini-card">
-      <dl>
-        <dt>工具</dt>
-        <dd>{{ hedging.get('instrument', '—') }}</dd>
-        <dt>覆盖比例（名义本金）</dt>
-        <dd>
+<!-- VII. HEDGING + EXIT -->
+<section class="chapter">
+  <div class="two-col">
+    <div>
+      <h2>VII.A 对冲策略</h2>
+      {% if hedging %}
+      <table class="exec-table">
+        <tr><th>工具</th><td>{{ hedging.get('instrument', '—') }}</td></tr>
+        <tr><th>覆盖比例</th><td>
           {% set cov = hedging.get('target_coverage_pct') %}
-          {% if cov is not none %}{{ (cov * 100) | round(0) | int }}%{% else %}—{% endif %}
-        </dd>
-        <dt>理由</dt>
-        <dd style="color: var(--text-muted);">{{ hedging.get('rationale', '—') }}</dd>
-      </dl>
+          {% if cov is not none %}{{ (cov * 100) | round(0) | int }}% (名义本金占比){% else %}—{% endif %}
+        </td></tr>
+        <tr><th>理由</th><td class="muted">{{ hedging.get('rationale', '—') }}</td></tr>
+      </table>
+      {% else %}<p class="muted">（未提供对冲策略）</p>{% endif %}
     </div>
-    {% else %}<p style="color: var(--text-muted);">（未提供对冲策略）</p>{% endif %}
-  </div>
-  <div class="card">
-    <h2>🚪 退出策略</h2>
-    {% if exit_plan %}
-    <div class="mini-card">
-      <dl>
-        <dt>退出时点 / 方式 / 节奏</dt>
-        <dd>{{ exit_plan.get('horizon', '—') }} · {{ exit_plan.get('method', '—') }} · {{ exit_plan.get('pace', '—') }}</dd>
-        <dt>提前减持触发条件</dt>
-        <dd>
+    <div>
+      <h2>VII.B 退出策略</h2>
+      {% if exit_plan %}
+      <table class="exec-table">
+        <tr><th>退出时点</th><td>{{ exit_plan.get('horizon', '—') }}</td></tr>
+        <tr><th>方式 / 节奏</th><td>{{ exit_plan.get('method', '—') }} · {{ exit_plan.get('pace', '—') }}</td></tr>
+        <tr><th>提前减持触发</th><td>
           {% set tcs = exit_plan.get('trigger_conditions', []) %}
           {% if tcs %}
-            <ul style="padding-left: 16px; margin: 4px 0;">
-              {% for t in tcs %}<li>{{ t }}</li>{% endfor %}
-            </ul>
-          {% else %}<span style="color: var(--text-muted);">无</span>{% endif %}
-        </dd>
-      </dl>
+            <ul class="tight" style="margin: 0;">{% for t in tcs %}<li>{{ t }}</li>{% endfor %}</ul>
+          {% else %}<span class="muted">无</span>{% endif %}
+        </td></tr>
+      </table>
+      {% else %}<p class="muted">（未提供退出策略）</p>{% endif %}
     </div>
-    {% else %}<p style="color: var(--text-muted);">（未提供退出策略）</p>{% endif %}
   </div>
-</div>
+</section>
 
-<!-- ===================== KILL SWITCHES ===================== -->
-<div class="card">
-  <h2>🚨 Kill Switches（认购后退出触发）</h2>
+<!-- VIII. KILL SWITCHES -->
+<section class="chapter">
+  <h2>VIII. Kill Switches（认购后退出触发）</h2>
   {% if d.get('kill_switches') %}
+  <table class="data kill-switches">
+    <thead>
+      <tr>
+        <th style="width: 50px;">严重度</th>
+        <th>触发事件</th>
+        <th style="width: 200px;">动作</th>
+        <th>阈值依据</th>
+      </tr>
+    </thead>
+    <tbody>
     {% for ks in d.get('kill_switches', []) %}
-    <div class="kill-switch severity-{{ ks.get('severity', '中') }}">
-      <div class="ks-icon">
-        {% if ks.get('severity') == '高' %}🔴{% elif ks.get('severity') == '中' %}🟠{% else %}🟡{% endif %}
-      </div>
-      <div class="ks-body">
-        <div class="ks-trigger">
-          {{ ks.get('trigger', '—') }}
-          <span class="ks-severity">{{ ks.get('severity', '中') }}</span>
-        </div>
-        <div class="ks-action">→ {{ ks.get('action', '—') }}</div>
-        {% if ks.get('rationale') %}
-        <div style="font-size: 12px; color: var(--text-muted); margin-top: 6px; padding: 4px 0; border-top: 1px dashed var(--border);">
-          <strong>📖 阈值依据:</strong> {{ ks.get('rationale') }}
-        </div>
-        {% endif %}
-        {% if ks.get('historical_precedent') %}
-        <div style="font-size: 12px; color: var(--text-muted); font-style: italic;">
-          🕰 历史案例: {{ ks.get('historical_precedent') }}
-        </div>
-        {% endif %}
-      </div>
-    </div>
+      <tr>
+        <td class="severity severity-{{ ks.get('severity', '中') }}">{{ ks.get('severity', '中') }}</td>
+        <td><strong>{{ ks.get('trigger', '—') }}</strong></td>
+        <td>{{ ks.get('action', '—') }}</td>
+        <td class="muted">
+          {{ ks.get('rationale', '—') }}
+          {% if ks.get('historical_precedent') %}
+          <br><span style="font-size: 11px;">历史案例: {{ ks.get('historical_precedent') }}</span>
+          {% endif %}
+        </td>
+      </tr>
     {% endfor %}
-  {% else %}<p style="color: var(--text-muted);">（未提供 kill switches）</p>{% endif %}
-</div>
+    </tbody>
+  </table>
+  {% else %}<p class="muted">（未提供 kill switches）</p>{% endif %}
+</section>
 
-<!-- ===================== MONITORING KPIs ===================== -->
-<div class="card">
-  <h2>📈 监控 KPI</h2>
+<!-- IX. MONITORING KPIs -->
+<section class="chapter">
+  <h2>IX. 监控 KPI</h2>
   {% if d.get('monitoring_kpis_detailed') %}
-  <table>
-    <thead><tr><th>KPI</th><th>阈值</th><th>频率</th><th>违阈动作</th><th>阈值依据</th></tr></thead>
+  <table class="data">
+    <thead>
+      <tr><th>KPI</th><th style="width: 80px;">阈值</th><th style="width: 70px;">频率</th><th>违阈动作</th><th>阈值依据</th></tr>
+    </thead>
     <tbody>
     {% for k in d.get('monitoring_kpis_detailed', []) %}
       <tr>
         <td><strong>{{ k.get('name', '—') }}</strong></td>
         <td>
           {% set tr = k.get('threshold_rationale', '') %}
-          {% if tr %}
-            <span class="fig-with-rationale" data-rationale="{{ tr }}{% if k.get('industry_benchmark') %}{{ '\n行业基准: ' + k.get('industry_benchmark') }}{% endif %}">
+          {% set ib = k.get('industry_benchmark', '') %}
+          {% if tr or ib %}
+            <span class="fig-with-rationale" data-rationale="{{ tr }}{% if ib %}{{ '\n行业基准: ' + ib }}{% endif %}">
               <code>{{ k.get('threshold', '—') }}</code>
             </span>
           {% else %}<code>{{ k.get('threshold', '—') }}</code>{% endif %}
         </td>
         <td>{{ k.get('frequency', '—') }}</td>
-        <td style="color: var(--text-muted);">{{ k.get('action_if_breach', '—') }}</td>
-        <td style="font-size: 12px; color: var(--text-muted);">
-          {% if k.get('threshold_rationale') %}{{ k.get('threshold_rationale')[:80] }}{% if k.get('threshold_rationale', '')|length > 80 %}…{% endif %}
-          {% else %}—{% endif %}
-        </td>
+        <td class="muted">{{ k.get('action_if_breach', '—') }}</td>
+        <td class="muted" style="font-size: 11.5px;">{{ k.get('threshold_rationale', '—') }}</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
   {% elif d.get('monitoring_kpis') %}
-  <ul class="bullet-list">
-    {% for k in d.get('monitoring_kpis', []) %}<li>{{ k }}</li>{% endfor %}
-  </ul>
-  {% else %}<p style="color: var(--text-muted);">（未提供监控 KPI）</p>{% endif %}
-</div>
+  <ul class="tight">{% for k in d.get('monitoring_kpis', []) %}<li>{{ k }}</li>{% endfor %}</ul>
+  {% else %}<p class="muted">（未提供监控 KPI）</p>{% endif %}
+</section>
 
-<!-- ===================== DEAL CONDITIONS ===================== -->
-<div class="card">
-  <h2>📑 硬性认购条件 (Deal Conditions)</h2>
-  {% if d.get('deal_conditions') %}
-  <ul class="bullet-list condition">
+<!-- X. DEAL CONDITIONS -->
+{% if d.get('deal_conditions') %}
+<section class="chapter">
+  <h2>X. 硬性认购条件</h2>
+  <ul class="tight">
     {% for c in d.get('deal_conditions', []) %}<li>{{ c }}</li>{% endfor %}
   </ul>
-  {% else %}<p style="color: var(--text-muted);">（无）</p>{% endif %}
-</div>
+</section>
+{% endif %}
 
-<!-- ===================== DECISION NARRATIVE ===================== -->
-<div class="card narrative">
-  <h2>📝 决议全文</h2>
-  {{ decision_html | safe }}
-</div>
+<!-- XI. DECISION NARRATIVE -->
+<section class="chapter">
+  <h2>XI. 决议全文</h2>
+  <div class="narrative">{{ decision_html | safe }}</div>
+</section>
 
-<!-- ===================== AGENT BRIEFS (collapsible) ===================== -->
-<div class="card">
-  <h2>📚 各环节简报合集（可展开）</h2>
+<!-- XII. AGENT BRIEFS -->
+<section class="chapter">
+  <h2>XII. 各环节简报合集</h2>
+  <p class="note">默认折叠, 点击章节展开。</p>
   {% for name, brief_html in briefs %}
-  <details class="brief-section">
+  <details class="brief">
     <summary>{{ agent_label(name) }}</summary>
     <div class="brief-body">{{ brief_html | safe }}</div>
   </details>
   {% endfor %}
-</div>
+</section>
 
-<!-- ===================== FOOTER ===================== -->
-<div class="footer">
-  生成时间: {{ generated_at }}<br>
-  完整决议 JSON / 各 Agent markdown 报告见同目录下 <code>FINAL_MEMO.md</code> 及 <code>0X_*.md</code>
-</div>
+<footer>
+  生成时间 {{ generated_at }} ·
+  详细分项报告见同目录 <code>FINAL_MEMO.md</code> 及 <code>0X_*.md</code> ·
+  完整决议 JSON 见 <code>09_decision.md</code>
+</footer>
 
 </div></body></html>

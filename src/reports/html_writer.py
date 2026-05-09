@@ -19,23 +19,23 @@ from src.agents.base import AgentContext
 
 
 _AGENT_LABELS = {
-    "prospectus_analyst": "📕 招股书深度分析",
-    "industry": "🏭 行业研究",
-    "macro": "🌐 宏观策略",
-    "comparable": "📊 可比公司估值",
-    "tech_trend": "🔬 技术发展趋势",
-    "sentiment": "💭 二级市场情绪",
-    "fact_check": "🔍 事实核对",
-    "debate_manager": "⚖ Bull/Bear 辩论裁决",
-    "bull": "🟢 Bull 多头观点",
-    "bear": "🔴 Bear 空头观点",
-    "risk": "🛡 风控独立评估",
-    "decision": "🎯 最终投决",
+    "prospectus_analyst": "招股书深度分析",
+    "industry": "行业研究",
+    "macro": "宏观策略",
+    "comparable": "可比公司估值",
+    "tech_trend": "技术发展趋势",
+    "sentiment": "二级市场情绪",
+    "fact_check": "事实核对",
+    "debate_manager": "Bull/Bear 辩论裁决",
+    "bull": "Bull 多头观点",
+    "bear": "Bear 空头观点",
+    "risk": "风控独立评估",
+    "decision": "最终投决",
 }
 
 
 def _agent_label(name: str) -> str:
-    return _AGENT_LABELS.get(name, f"📄 {name}")
+    return _AGENT_LABELS.get(name, name)
 
 
 def _md_to_html(text: str) -> str:

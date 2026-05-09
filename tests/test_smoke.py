@@ -1409,7 +1409,7 @@ def test_final_memo_writer_renders_sensitivity(tmp_path) -> None:
     out = write_final_summary(ctx)
     text = out.read_text(encoding="utf-8")
     # 校验关键章节都渲染了
-    assert "Executive Summary" in text
+    assert "投决摘要" in text
     assert "敏感性分析" in text
     assert "对冲策略" in text
     assert "Kill Switches" in text
@@ -1638,7 +1638,7 @@ def test_render_ic_memo_html_includes_all_sections(tmp_path) -> None:
     assert "CTO 离职" in text
     assert "毛利率" in text
     # CSS 类色编码
-    assert "recommend-认购" in text
+    assert "rec-认购" in text
     assert "scenario-悲观" in text and "scenario-乐观" in text
     assert "severity-高" in text
     # 自包含: 不应有外部 <link> 或外部 <script>
@@ -1671,7 +1671,7 @@ def test_html_writer_handles_minimal_decision(tmp_path) -> None:
     # 该有的占位符
     assert "敏感性分析缺失" in text or "敏感性" in text
     assert "未提供 kill switches" in text
-    assert "recommend-观望" in text
+    assert "rec-观望" in text
 
 
 def test_write_final_summary_emits_both_md_and_html(tmp_path) -> None:
@@ -1888,7 +1888,7 @@ def test_html_renders_reasoning_chain_and_assumptions(tmp_path) -> None:
     out = write_ic_memo_html(ctx)
     text = out.read_text(encoding="utf-8")
     # v3 关键章节
-    assert "关键假设清单" in text
+    assert "投决依赖的核心假设" in text or "关键假设" in text
     assert "估值方法分拆" in text
     assert "推理链" in text
     # 推理步骤内容
@@ -1896,8 +1896,8 @@ def test_html_renders_reasoning_chain_and_assumptions(tmp_path) -> None:
     assert "+10% 溢价" in text
     assert "集中度风险" in text  # caveats
     assert "conf-中" in text  # 置信度 CSS 类
-    # 估值方法卡
-    assert "method-card" in text
+    # 估值方法行
+    assert "method-row" in text or "method-card" in text
     assert "22 × 3.6 = 79" in text  # formula
     # rationale tooltip
     assert "data-rationale" in text
