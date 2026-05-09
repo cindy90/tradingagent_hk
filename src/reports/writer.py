@@ -114,7 +114,13 @@ def _render_list(items: list, prefix: str = "- ") -> str:
     return "\n".join(f"{prefix}{i}" for i in items)
 
 
-def write_final_summary(ctx: AgentContext) -> Path:
+def write_final_summary(ctx: AgentContext, *, also_html: bool = True) -> Path:
+    """生成 FINAL_MEMO.md 主文件。
+
+    Args:
+        also_html: True (默认) 时同时输出 FINAL_MEMO.html (投行级视觉, 邮件友好)。
+                   失败时静默回退（不阻塞 markdown 输出）。
+    """
     d = ctx.extras.decision_json or {}
     decision_json_str = json.dumps(d, ensure_ascii=False, indent=2) if d else "{}"
 
@@ -213,4 +219,15 @@ def write_final_summary(ctx: AgentContext) -> Path:
 """
     out = ctx.reports_dir / "FINAL_MEMO.md"
     out.write_text(md, encoding="utf-8")
+
+    if also_html:
+        try:
+            from src.reports.html_writer import write_ic_memo_html
+            html_path = write_ic_memo_html(ctx)
+            from loguru import logger
+            logger.info(f"FINAL_MEMO.html 已生成: {html_path}")
+        except Exception as e:
+            from loguru import logger
+            logger.warning(f"HTML 渲染失败（不影响 markdown 输出）: {e}")
+
     return out

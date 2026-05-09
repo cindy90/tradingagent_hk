@@ -1579,3 +1579,146 @@ def test_peer_suggester_clamps_score_to_0_5() -> None:
     text3 = '```json\n[{"ticker":"02432","name":"x","reason":"x"}]\n```'
     out3 = _parse_candidates(text3)
     assert out3[0].similarity_score == 3.0
+
+
+# ============================================================================
+# HTML IC memo 渲染测试
+# ============================================================================
+
+def test_render_ic_memo_html_includes_all_sections(tmp_path) -> None:
+    """端到端: HTML 必须含 Executive Summary / 敏感性表 / kill switches / KPI 等."""
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.reports.html_writer import write_ic_memo_html
+
+    extras = WorkflowExtras()
+    extras.decision_json = {
+        "recommendation": "认购",
+        "confidence": "高",
+        "valuation_range_hkd_billion": {"low": 60, "mid": 80, "high": 100, "anchor_method": "PEG"},
+        "ipo_pricing_view": "合理",
+        "suggested_amount_usd_million": [10, 20],
+        "key_supports": ["技术领先"],
+        "key_risks": ["客户集中度高"],
+        "deal_conditions": ["招股价 PS ≤ 30x"],
+        "sensitivity_table": [
+            {"name": "悲观", "triggers": ["毛利<30%"], "valuation_hkd_b": 45, "probability": 0.3, "expected_return_pct": -44.0},
+            {"name": "基准", "triggers": ["持平"], "valuation_hkd_b": 80, "probability": 0.5, "expected_return_pct": 0.0},
+            {"name": "乐观", "triggers": ["二曲线"], "valuation_hkd_b": 130, "probability": 0.2, "expected_return_pct": 62.5},
+        ],
+        "hedging_strategy": {"instrument": "ETF PUT", "target_coverage_pct": 0.3, "rationale": "对冲系统性风险"},
+        "exit_plan": {"horizon": "D+0", "method": "VWAP", "pace": "5 日", "trigger_conditions": []},
+        "kill_switches": [
+            {"trigger": "CTO 离职", "action": "减持 100%", "severity": "高"},
+        ],
+        "monitoring_kpis_detailed": [
+            {"name": "毛利率", "threshold": "<30%", "frequency": "季报", "action_if_breach": "评估"},
+        ],
+    }
+
+    ctx = AgentContext(
+        project_id="html_test", ticker="X", company_name="测试公司",
+        industry="工业机器人", reports_dir=tmp_path, rag=None, extras=extras,
+    )
+    ctx.full_reports["decision"] = "## 投决论述\n详细论证..."
+    ctx.briefs["prospectus_analyst"] = "**核心结论**: 业务良好"
+    ctx.briefs["decision"] = "**最终建议**: 认购"
+
+    out = write_ic_memo_html(ctx)
+    text = out.read_text(encoding="utf-8")
+
+    # 关键元素
+    assert "<!DOCTYPE html>" in text
+    assert "测试公司" in text
+    assert "认购" in text
+    assert "高" in text  # confidence
+    assert "敏感性分析" in text
+    assert "Kill Switches" in text
+    assert "悲观" in text and "基准" in text and "乐观" in text
+    assert "CTO 离职" in text
+    assert "毛利率" in text
+    # CSS 类色编码
+    assert "recommend-认购" in text
+    assert "scenario-悲观" in text and "scenario-乐观" in text
+    assert "severity-高" in text
+    # 自包含: 不应有外部 <link> 或外部 <script>
+    assert "<link rel=\"stylesheet\"" not in text
+    assert "<script src=" not in text
+
+
+def test_html_writer_handles_minimal_decision(tmp_path) -> None:
+    """决议字段大量缺失（早期版本/decision retry 失败）也不应崩。"""
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.reports.html_writer import write_ic_memo_html
+
+    extras = WorkflowExtras()
+    extras.decision_json = {
+        "recommendation": "观望",
+        "confidence": "低",
+        "valuation_range_hkd_billion": {"mid": 50, "anchor_method": "PE"},
+        "ipo_pricing_view": "偏高",
+        "suggested_amount_usd_million": [],
+        "key_supports": [],
+        "key_risks": [],
+    }
+    ctx = AgentContext(
+        project_id="x", ticker="X", company_name="测试", industry="x",
+        reports_dir=tmp_path, rag=None, extras=extras,
+    )
+    out = write_ic_memo_html(ctx)
+    text = out.read_text(encoding="utf-8")
+    # 该有的占位符
+    assert "敏感性分析缺失" in text or "敏感性" in text
+    assert "未提供 kill switches" in text
+    assert "recommend-观望" in text
+
+
+def test_write_final_summary_emits_both_md_and_html(tmp_path) -> None:
+    """write_final_summary 同时输出 .md + .html"""
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.reports.writer import write_final_summary
+
+    extras = WorkflowExtras()
+    extras.decision_json = {
+        "recommendation": "认购",
+        "confidence": "中",
+        "valuation_range_hkd_billion": {"mid": 80, "anchor_method": "PE"},
+        "ipo_pricing_view": "合理",
+        "suggested_amount_usd_million": [10, 20],
+        "key_supports": ["x"],
+        "key_risks": ["y"],
+    }
+    ctx = AgentContext(
+        project_id="dual_out", ticker="X", company_name="测试", industry="x",
+        reports_dir=tmp_path, rag=None, extras=extras,
+    )
+    md_path = write_final_summary(ctx, also_html=True)
+    assert md_path.exists()
+    assert md_path.suffix == ".md"
+    html_path = tmp_path / "FINAL_MEMO.html"
+    assert html_path.exists()
+    # md 不被影响
+    assert "基石投资决策备忘录" in md_path.read_text(encoding="utf-8")
+
+
+def test_write_final_summary_no_html_skips_html(tmp_path) -> None:
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.reports.writer import write_final_summary
+
+    extras = WorkflowExtras()
+    extras.decision_json = {
+        "recommendation": "观望", "confidence": "中",
+        "valuation_range_hkd_billion": {"mid": 50, "anchor_method": "PE"},
+        "ipo_pricing_view": "偏高", "suggested_amount_usd_million": [0, 0],
+        "key_supports": ["x"], "key_risks": ["y"],
+    }
+    ctx = AgentContext(
+        project_id="md_only", ticker="X", company_name="测试", industry="x",
+        reports_dir=tmp_path, rag=None, extras=extras,
+    )
+    write_final_summary(ctx, also_html=False)
+    assert (tmp_path / "FINAL_MEMO.md").exists()
+    assert not (tmp_path / "FINAL_MEMO.html").exists()

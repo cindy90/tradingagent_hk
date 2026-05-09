@@ -119,6 +119,14 @@ def analyze(
         False, "--no-peer-pool",
         help="禁用行业池（退化到 v1: LLM 从招股书 RAG 自由提取, 不推荐）",
     ),
+    no_html: bool = typer.Option(
+        False, "--no-html",
+        help="禁用 FINAL_MEMO.html 渲染（默认同时输出 .md + .html）",
+    ),
+    open_html: bool = typer.Option(
+        False, "--open-html",
+        help="生成完成后自动用浏览器打开 FINAL_MEMO.html",
+    ),
 ) -> None:
     """对单个 IPO 项目跑完整深度分析。"""
     _setup_logging()
@@ -219,8 +227,16 @@ def analyze(
         ifind_target=ifind_target,
     )
 
-    final_path = write_final_summary(ctx)
-    console.print(f"\n[green]✓ 完成。投决备忘录:[/green] {final_path}")
+    final_path = write_final_summary(ctx, also_html=not no_html)
+    console.print(f"\n[green]✓ 完成。投决备忘录 (Markdown):[/green] {final_path}")
+    if not no_html:
+        html_path = ctx.reports_dir / "FINAL_MEMO.html"
+        if html_path.exists():
+            console.print(f"[green]  投决备忘录 (HTML):[/green] {html_path}")
+            if open_html:
+                import webbrowser
+                webbrowser.open(html_path.as_uri())
+                console.print(f"[cyan]  已尝试用浏览器打开[/cyan]")
     console.print(f"[green]  分项报告目录:[/green] {ctx.reports_dir}")
     decision = ctx.extras.decision_json
     if decision:

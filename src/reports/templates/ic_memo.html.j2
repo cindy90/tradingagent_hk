@@ -1,0 +1,487 @@
+{# IC Memo HTML 模板 - 投行级别视觉
+
+设计原则:
+- 完全自包含 (内联 CSS, 0 外部依赖, 单文件可发邮件)
+- 浅色背景, 数据驱动, 视觉层次清晰
+- 颜色编码: 推荐 (绿/黄/橙/红) / 风险 (红橙黄绿) / 情景 (悲观红/基准灰/乐观绿)
+- 移动端友好 (响应式 + 表格滚动)
+#}<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IC Memo · {{ ctx.company_name }} ({{ ctx.ticker }})</title>
+<style>
+:root {
+  --bg: #fafafa;
+  --card-bg: #ffffff;
+  --border: #e5e7eb;
+  --text: #1f2937;
+  --text-muted: #6b7280;
+  --accent: #1e40af;
+  --green: #10b981;
+  --yellow: #f59e0b;
+  --orange: #f97316;
+  --red: #ef4444;
+  --bear: #fee2e2;
+  --base: #f3f4f6;
+  --bull: #d1fae5;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 0;
+  background: var(--bg);
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text);
+}
+.container { max-width: 1100px; margin: 0 auto; padding: 32px 28px; }
+
+/* Header */
+.header {
+  background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%);
+  color: white;
+  padding: 36px 32px;
+  border-radius: 12px;
+  margin-bottom: 24px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+}
+.header h1 { margin: 0 0 8px 0; font-size: 24px; font-weight: 600; }
+.header .meta { font-size: 13px; opacity: 0.9; }
+.header .meta span { margin-right: 16px; }
+
+/* Cards */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px 24px;
+  margin-bottom: 18px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.card h2 {
+  margin: 0 0 14px 0;
+  font-size: 17px;
+  color: var(--accent);
+  border-bottom: 2px solid var(--border);
+  padding-bottom: 8px;
+}
+.card h3 { font-size: 15px; margin: 18px 0 8px; }
+
+/* Executive Summary 大卡片 */
+.exec-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.exec-cell {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 18px;
+  border-left: 4px solid var(--accent);
+}
+.exec-cell .label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.exec-cell .value { font-size: 22px; font-weight: 600; margin-top: 4px; color: var(--text); }
+.exec-cell.recommend-认购     { border-left-color: var(--green); }
+.exec-cell.recommend-审慎参与 { border-left-color: var(--yellow); }
+.exec-cell.recommend-观望     { border-left-color: var(--orange); }
+.exec-cell.recommend-不认购   { border-left-color: var(--red); }
+.exec-cell.recommend-认购 .value     { color: var(--green); }
+.exec-cell.recommend-审慎参与 .value { color: var(--yellow); }
+.exec-cell.recommend-观望 .value     { color: var(--orange); }
+.exec-cell.recommend-不认购 .value   { color: var(--red); }
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 8px 0;
+}
+th, td {
+  padding: 9px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+th {
+  background: #f9fafb;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+tr:hover td { background: #fafbfc; }
+
+/* 敏感性表格颜色编码 */
+tr.scenario-悲观 td { background: var(--bear); }
+tr.scenario-基准 td { background: var(--base); }
+tr.scenario-乐观 td { background: var(--bull); }
+
+/* Kill switch alert */
+.kill-switch {
+  display: flex;
+  align-items: flex-start;
+  padding: 12px 16px;
+  margin: 8px 0;
+  border-left: 4px solid;
+  border-radius: 6px;
+  background: #fff7ed;
+}
+.kill-switch.severity-高 { border-left-color: var(--red); background: #fef2f2; }
+.kill-switch.severity-中 { border-left-color: var(--orange); background: #fff7ed; }
+.kill-switch.severity-低 { border-left-color: var(--yellow); background: #fefce8; }
+.kill-switch .ks-icon { font-size: 18px; margin-right: 12px; flex-shrink: 0; }
+.kill-switch .ks-body { flex: 1; }
+.kill-switch .ks-trigger { font-weight: 600; margin-bottom: 4px; }
+.kill-switch .ks-action { color: var(--text-muted); font-size: 13px; }
+.kill-switch .ks-severity {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: 8px;
+}
+.kill-switch.severity-高 .ks-severity { background: var(--red); color: white; }
+.kill-switch.severity-中 .ks-severity { background: var(--orange); color: white; }
+.kill-switch.severity-低 .ks-severity { background: var(--yellow); color: white; }
+
+/* List items */
+.bullet-list { list-style: none; padding: 0; margin: 8px 0; }
+.bullet-list li {
+  padding: 8px 0 8px 24px;
+  position: relative;
+  border-bottom: 1px dashed var(--border);
+}
+.bullet-list li:last-child { border-bottom: none; }
+.bullet-list li::before {
+  content: "▸";
+  position: absolute;
+  left: 4px;
+  color: var(--accent);
+  font-weight: bold;
+}
+.bullet-list.support li::before { color: var(--green); }
+.bullet-list.risk li::before    { color: var(--red); content: "⚠"; }
+.bullet-list.condition li::before { color: var(--orange); content: "✦"; }
+
+/* Hedging / Exit cards */
+.duo-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 700px) {
+  .duo-grid { grid-template-columns: 1fr; }
+}
+.mini-card {
+  background: #f9fafb;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+.mini-card h4 { margin: 0 0 8px 0; font-size: 14px; color: var(--accent); }
+.mini-card dl { margin: 0; }
+.mini-card dt { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+.mini-card dd { margin: 2px 0 0 0; font-weight: 500; }
+
+/* Probability bar */
+.prob-bar {
+  display: inline-block;
+  width: 60px;
+  height: 8px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+.prob-bar > span { display: block; height: 100%; background: var(--accent); }
+
+/* Brief sections (collapsible) */
+details.brief-section {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 10px 0;
+  background: #fafafa;
+}
+details.brief-section > summary {
+  cursor: pointer;
+  padding: 12px 16px;
+  font-weight: 600;
+  color: var(--accent);
+  user-select: none;
+}
+details.brief-section[open] > summary { border-bottom: 1px solid var(--border); }
+details.brief-section .brief-body { padding: 14px 16px; font-size: 13px; line-height: 1.7; }
+details.brief-section .brief-body p { margin: 6px 0; }
+
+/* Footer */
+.footer {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 32px 0 16px;
+  border-top: 1px solid var(--border);
+  margin-top: 32px;
+}
+.footer code { background: var(--base); padding: 2px 6px; border-radius: 3px; }
+
+/* Decision narrative section */
+.narrative {
+  font-size: 14px;
+  line-height: 1.8;
+}
+.narrative h2 { color: var(--accent); margin-top: 24px; }
+.narrative h3 { color: #4b5563; margin-top: 18px; }
+.narrative table {
+  font-size: 12px;
+}
+.narrative blockquote {
+  border-left: 3px solid var(--accent);
+  margin: 12px 0;
+  padding-left: 14px;
+  color: var(--text-muted);
+}
+
+/* Print friendly */
+@media print {
+  body { background: white; }
+  .card, .header { page-break-inside: avoid; }
+  details.brief-section { page-break-before: avoid; }
+  details.brief-section[open] .brief-body { display: block !important; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- ===================== HEADER ===================== -->
+<div class="header">
+  <h1>📋 基石投资决策备忘录 · IC Memo</h1>
+  <div class="meta">
+    <span><strong>{{ ctx.company_name }}</strong> ({{ ctx.ticker }})</span>
+    <span>行业: {{ ctx.industry }}</span>
+    <span>项目 ID: <code>{{ ctx.project_id }}</code></span>
+  </div>
+</div>
+
+<!-- ===================== EXECUTIVE SUMMARY ===================== -->
+<div class="exec-summary">
+  <div class="exec-cell recommend-{{ d.get('recommendation', '观望') }}">
+    <div class="label">最终建议</div>
+    <div class="value">{{ d.get('recommendation', '—') }}</div>
+  </div>
+  <div class="exec-cell">
+    <div class="label">置信度</div>
+    <div class="value">{{ d.get('confidence', '—') }}</div>
+  </div>
+  <div class="exec-cell">
+    <div class="label">定价观点</div>
+    <div class="value" style="font-size: 18px;">{{ d.get('ipo_pricing_view', '—') }}</div>
+  </div>
+  <div class="exec-cell">
+    <div class="label">估值中枢 (亿 HKD)</div>
+    <div class="value">{{ valuation.get('mid', '—') }}</div>
+    <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">
+      {{ valuation.get('low', '—') }} ~ {{ valuation.get('high', '—') }}
+      ({{ valuation.get('anchor_method', '—') }})
+    </div>
+  </div>
+  <div class="exec-cell">
+    <div class="label">建议金额 (USD M)</div>
+    <div class="value">
+      {%- if amounts and amounts|length >= 2 -%}
+        {{ amounts[0] }} ~ {{ amounts[1] }}
+      {%- else -%}
+        —
+      {%- endif -%}
+    </div>
+  </div>
+</div>
+
+<!-- ===================== KEY SUPPORTS / RISKS ===================== -->
+<div class="duo-grid">
+  <div class="card">
+    <h2>✓ 关键支持</h2>
+    {% if d.get('key_supports') %}
+    <ul class="bullet-list support">
+      {% for s in d.get('key_supports', []) %}<li>{{ s }}</li>{% endfor %}
+    </ul>
+    {% else %}<p style="color: var(--text-muted);">（无）</p>{% endif %}
+  </div>
+  <div class="card">
+    <h2>⚠ 核心风险</h2>
+    {% if d.get('key_risks') %}
+    <ul class="bullet-list risk">
+      {% for r in d.get('key_risks', []) %}<li>{{ r }}</li>{% endfor %}
+    </ul>
+    {% else %}<p style="color: var(--text-muted);">（无）</p>{% endif %}
+  </div>
+</div>
+
+<!-- ===================== SENSITIVITY ===================== -->
+<div class="card">
+  <h2>📊 敏感性分析（三档情景）</h2>
+  {% if d.get('sensitivity_table') %}
+  <table>
+    <thead>
+      <tr>
+        <th>情景</th>
+        <th>触发条件</th>
+        <th>估值 (亿 HKD)</th>
+        <th>概率</th>
+        <th>预期回报</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for s in d.get('sensitivity_table', []) %}
+      <tr class="scenario-{{ s.get('name', '') }}">
+        <td><strong>{{ s.get('name', '') }}</strong></td>
+        <td>{{ s.get('triggers', []) | join('; ') }}</td>
+        <td>{{ s.get('valuation_hkd_b', '—') }}</td>
+        <td>
+          {% set p = s.get('probability', 0) %}
+          <span class="prob-bar"><span style="width: {{ (p * 100) | int }}%;"></span></span>
+          {{ (p * 100) | round(0) | int }}%
+        </td>
+        <td>
+          {% set r = s.get('expected_return_pct') %}
+          {% if r is not none %}
+            <strong style="color: {% if r > 0 %}var(--green){% elif r < 0 %}var(--red){% else %}var(--text-muted){% endif %};">
+              {{ '+' if r > 0 else '' }}{{ '%.1f'|format(r) }}%
+            </strong>
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p style="color: var(--text-muted);">（敏感性分析缺失）</p>{% endif %}
+</div>
+
+<!-- ===================== HEDGING + EXIT ===================== -->
+<div class="duo-grid">
+  <div class="card">
+    <h2>🛡 对冲策略</h2>
+    {% if hedging %}
+    <div class="mini-card">
+      <dl>
+        <dt>工具</dt>
+        <dd>{{ hedging.get('instrument', '—') }}</dd>
+        <dt>覆盖比例（名义本金）</dt>
+        <dd>
+          {% set cov = hedging.get('target_coverage_pct') %}
+          {% if cov is not none %}{{ (cov * 100) | round(0) | int }}%{% else %}—{% endif %}
+        </dd>
+        <dt>理由</dt>
+        <dd style="color: var(--text-muted);">{{ hedging.get('rationale', '—') }}</dd>
+      </dl>
+    </div>
+    {% else %}<p style="color: var(--text-muted);">（未提供对冲策略）</p>{% endif %}
+  </div>
+  <div class="card">
+    <h2>🚪 退出策略</h2>
+    {% if exit_plan %}
+    <div class="mini-card">
+      <dl>
+        <dt>退出时点 / 方式 / 节奏</dt>
+        <dd>{{ exit_plan.get('horizon', '—') }} · {{ exit_plan.get('method', '—') }} · {{ exit_plan.get('pace', '—') }}</dd>
+        <dt>提前减持触发条件</dt>
+        <dd>
+          {% set tcs = exit_plan.get('trigger_conditions', []) %}
+          {% if tcs %}
+            <ul style="padding-left: 16px; margin: 4px 0;">
+              {% for t in tcs %}<li>{{ t }}</li>{% endfor %}
+            </ul>
+          {% else %}<span style="color: var(--text-muted);">无</span>{% endif %}
+        </dd>
+      </dl>
+    </div>
+    {% else %}<p style="color: var(--text-muted);">（未提供退出策略）</p>{% endif %}
+  </div>
+</div>
+
+<!-- ===================== KILL SWITCHES ===================== -->
+<div class="card">
+  <h2>🚨 Kill Switches（认购后退出触发）</h2>
+  {% if d.get('kill_switches') %}
+    {% for ks in d.get('kill_switches', []) %}
+    <div class="kill-switch severity-{{ ks.get('severity', '中') }}">
+      <div class="ks-icon">
+        {% if ks.get('severity') == '高' %}🔴{% elif ks.get('severity') == '中' %}🟠{% else %}🟡{% endif %}
+      </div>
+      <div class="ks-body">
+        <div class="ks-trigger">
+          {{ ks.get('trigger', '—') }}
+          <span class="ks-severity">{{ ks.get('severity', '中') }}</span>
+        </div>
+        <div class="ks-action">→ {{ ks.get('action', '—') }}</div>
+      </div>
+    </div>
+    {% endfor %}
+  {% else %}<p style="color: var(--text-muted);">（未提供 kill switches）</p>{% endif %}
+</div>
+
+<!-- ===================== MONITORING KPIs ===================== -->
+<div class="card">
+  <h2>📈 监控 KPI</h2>
+  {% if d.get('monitoring_kpis_detailed') %}
+  <table>
+    <thead><tr><th>KPI</th><th>阈值</th><th>频率</th><th>违阈动作</th></tr></thead>
+    <tbody>
+    {% for k in d.get('monitoring_kpis_detailed', []) %}
+      <tr>
+        <td><strong>{{ k.get('name', '—') }}</strong></td>
+        <td><code>{{ k.get('threshold', '—') }}</code></td>
+        <td>{{ k.get('frequency', '—') }}</td>
+        <td style="color: var(--text-muted);">{{ k.get('action_if_breach', '—') }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% elif d.get('monitoring_kpis') %}
+  <ul class="bullet-list">
+    {% for k in d.get('monitoring_kpis', []) %}<li>{{ k }}</li>{% endfor %}
+  </ul>
+  {% else %}<p style="color: var(--text-muted);">（未提供监控 KPI）</p>{% endif %}
+</div>
+
+<!-- ===================== DEAL CONDITIONS ===================== -->
+<div class="card">
+  <h2>📑 硬性认购条件 (Deal Conditions)</h2>
+  {% if d.get('deal_conditions') %}
+  <ul class="bullet-list condition">
+    {% for c in d.get('deal_conditions', []) %}<li>{{ c }}</li>{% endfor %}
+  </ul>
+  {% else %}<p style="color: var(--text-muted);">（无）</p>{% endif %}
+</div>
+
+<!-- ===================== DECISION NARRATIVE ===================== -->
+<div class="card narrative">
+  <h2>📝 决议全文</h2>
+  {{ decision_html | safe }}
+</div>
+
+<!-- ===================== AGENT BRIEFS (collapsible) ===================== -->
+<div class="card">
+  <h2>📚 各环节简报合集（可展开）</h2>
+  {% for name, brief_html in briefs %}
+  <details class="brief-section">
+    <summary>{{ agent_label(name) }}</summary>
+    <div class="brief-body">{{ brief_html | safe }}</div>
+  </details>
+  {% endfor %}
+</div>
+
+<!-- ===================== FOOTER ===================== -->
+<div class="footer">
+  生成时间: {{ generated_at }}<br>
+  完整决议 JSON / 各 Agent markdown 报告见同目录下 <code>FINAL_MEMO.md</code> 及 <code>0X_*.md</code>
+</div>
+
+</div></body></html>
