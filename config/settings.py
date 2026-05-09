@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     )
     ths_token_cache: str = Field(default="", alias="THS_TOKEN_CACHE")
     ths_token_ttl: int = Field(default=21600, alias="THS_TOKEN_TTL")
+    # iFinD Python SDK 的账号密码（不同于 REST 的 refresh_token，但是同一个 iFinD 账号）
+    # SDK 用于拉 peers 财务/估值倍数/K 线/南向资金等 REST 不支持的接口
+    ifind_username: str = Field(default="", alias="IFIND_USERNAME")
+    ifind_password: str = Field(default="", alias="IFIND_PASSWORD")
     hkex_api_key: str = Field(default="", alias="HKEX_API_KEY")
 
     data_dir: Path = Field(default=Path("./data"), alias="DATA_DIR")

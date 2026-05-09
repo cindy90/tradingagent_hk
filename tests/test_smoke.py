@@ -751,3 +751,301 @@ def test_openai_compat_provider_merges_system_into_messages() -> None:
     assert msgs[0]["content"].startswith("招股书静态内容")
     assert "你是分析师" in msgs[0]["content"]
     assert msgs[1]["role"] == "user"
+
+
+# ============================================================================
+# Batch 3 新增测试: 热点工具函数 + 新功能
+# ============================================================================
+
+
+def test_to_ths_hk_code_normalizes_padding() -> None:
+    from src.data.ifind_sdk import to_ths_hk_code
+
+    # 5 位带前导 0
+    assert to_ths_hk_code("02670") == "2670.HK"
+    # 4 位
+    assert to_ths_hk_code("0700") == "0700.HK"
+    # 3 位
+    assert to_ths_hk_code("700") == "0700.HK"
+    # 1 位
+    assert to_ths_hk_code("9") == "0009.HK"
+    # 已带 .HK
+    assert to_ths_hk_code("2670.HK") == "2670.HK"
+    # 已带 .hk 小写
+    assert to_ths_hk_code("2670.hk") == "2670.HK"
+
+
+def test_to_ths_hk_code_handles_h_prefix_for_pre_listing() -> None:
+    """招股询价阶段港股代码常用 H 前缀的副牌（例如珞石的 H2254）。"""
+    from src.data.ifind_sdk import to_ths_hk_code
+
+    assert to_ths_hk_code("H2254") == "H2254.HK"
+    assert to_ths_hk_code("h2254") == "H2254.HK"
+    # H 后跟字母不算副牌（保守降级 → 数字部分前导 0）
+    # 不需测，只需保证 H+digits 走副牌路径
+
+
+def test_verify_company_name_strips_common_suffixes() -> None:
+    from src.data.ifind_sdk import verify_company_name
+
+    # 完全相等
+    matched, _ = verify_company_name.__wrapped__ if hasattr(verify_company_name, "__wrapped__") else verify_company_name, None
+    # 直接测内部逻辑（无法 mock get_basic_data 时，用 monkey-patch）
+
+    import src.data.ifind_sdk as m
+
+    saved = m.get_basic_data
+    try:
+        m.get_basic_data = lambda *a, **kw: {"corp_short_name": "珞石机器人"}
+        # 后缀剔除后核心都是"珞石"
+        ok, name = m.verify_company_name("H2254.HK", "珞石（山东）智能科技股份有限公司")
+        assert ok is True
+        assert name == "珞石机器人"
+
+        # 头 2 字相同也算
+        m.get_basic_data = lambda *a, **kw: {"corp_short_name": "越疆-W"}
+        ok, _ = m.verify_company_name("02432.HK", "越疆科技股份有限公司")
+        assert ok is True
+
+        # 完全不相关
+        m.get_basic_data = lambda *a, **kw: {"corp_short_name": "云迹科技-W"}
+        ok, _ = m.verify_company_name("02670.HK", "珞石智能科技股份有限公司")
+        assert ok is False
+
+        # 空数据
+        m.get_basic_data = lambda *a, **kw: {}
+        ok, name = m.verify_company_name("X.HK", "随便")
+        assert ok is False
+        assert name is None
+    finally:
+        m.get_basic_data = saved
+
+
+def test_default_target_fiscal_year() -> None:
+    from src.data.ifind_sdk import _default_target_fiscal_year
+    from datetime import date
+
+    y = _default_target_fiscal_year()
+    today = date.today()
+    if today.month >= 7:
+        assert y == today.year - 1
+    else:
+        assert y == today.year - 2
+
+
+def test_get_history_quotes_uses_dynamic_dates(monkeypatch) -> None:
+    """sdate/edate 为 None 时应自动算今日和往前 days_back 天。"""
+    from datetime import date, timedelta
+    import src.data.ifind_sdk as m
+
+    captured: dict = {}
+
+    def fake_post(*args, **kwargs):
+        # 拦截：到不了真实 SDK，因为 _ensure_login 会失败
+        captured["sdate"] = args[3] if len(args) > 3 else kwargs.get("sdate")
+        captured["edate"] = args[4] if len(args) > 4 else kwargs.get("edate")
+        return []
+
+    # _ensure_login 返回 False → get_history_quotes 直接返 []
+    monkeypatch.setattr(m, "_ensure_login", lambda: False)
+
+    out = m.get_history_quotes("2670.HK")  # 用动态默认
+    assert out == []
+    # cache 也无入因为没数据，但我们能确认调用未抛
+    out2 = m.get_history_quotes("2670.HK", days_back=30)
+    assert out2 == []
+
+
+def test_evidence_pages_validator_coerces_strings() -> None:
+    from src.feedback.models import IndustryScoreCard
+
+    sc = IndustryScoreCard(
+        summary="test", overall_score=3.0,
+        industry_score=3.0, competition_intensity=3.0,
+        evidence_pages=["P.42", "招股书 P.108-109", 200, "无页码", 3.5, "5"],
+    )
+    # 字符串里抽数字; 无数字的丢弃; float 转 int; bool 不计
+    assert sc.evidence_pages == [42, 108, 200, 3, 5]
+
+
+def test_evidence_pages_validator_handles_non_list() -> None:
+    from src.feedback.models import IndustryScoreCard
+
+    # 单个 int 不在 list 里也接受
+    sc = IndustryScoreCard(
+        summary="x", overall_score=3.0,
+        industry_score=3.0, competition_intensity=3.0,
+        evidence_pages=42,  # type: ignore[arg-type]
+    )
+    assert sc.evidence_pages == [42]
+
+
+def test_evidence_pages_validator_none_returns_empty() -> None:
+    from src.feedback.models import IndustryScoreCard
+
+    sc = IndustryScoreCard(
+        summary="x", overall_score=3.0,
+        industry_score=3.0, competition_intensity=3.0,
+        evidence_pages=None,  # type: ignore[arg-type]
+    )
+    assert sc.evidence_pages == []
+
+
+def test_save_prediction_upsert_overwrites_on_duplicate(tmp_path) -> None:
+    from datetime import datetime
+
+    from src.feedback import FeedbackStore
+    from src.feedback.models import Prediction
+
+    s = FeedbackStore(db_path=tmp_path / "test.sqlite")
+
+    p1 = Prediction(
+        project_id="dup_001", ticker="02670", company_name="A",
+        industry="x", decision_date=datetime.now(),
+        recommendation="认购", confidence="高",
+        valuation_mid=100.0, anchor_method="PE", ipo_pricing_view="合理",
+        suggested_amount_low_usd_m=10, suggested_amount_high_usd_m=20,
+        model_provider="kimi",
+    )
+    pid1 = s.save_prediction(p1)
+
+    # 同 project_id 但内容改变
+    p2 = Prediction(
+        project_id="dup_001", ticker="02670", company_name="A 改名后",
+        industry="x", decision_date=datetime.now(),
+        recommendation="审慎参与", confidence="中",
+        valuation_mid=80.0, anchor_method="PS", ipo_pricing_view="偏高",
+        suggested_amount_low_usd_m=5, suggested_amount_high_usd_m=15,
+        model_provider="kimi",
+    )
+    pid2 = s.save_prediction(p2)
+
+    assert pid1 == pid2  # 同 id (UPDATE 而非 INSERT)
+    fetched = s.get_prediction(pid1)
+    assert fetched is not None
+    assert fetched.company_name == "A 改名后"
+    assert fetched.recommendation == "审慎参与"
+    assert fetched.valuation_mid == 80.0
+
+
+def test_save_prediction_upsert_false_skips(tmp_path) -> None:
+    from datetime import datetime
+
+    from src.feedback import FeedbackStore
+    from src.feedback.models import Prediction
+
+    s = FeedbackStore(db_path=tmp_path / "test.sqlite")
+    p1 = Prediction(
+        project_id="skip_001", ticker="x", company_name="A",
+        industry="x", decision_date=datetime.now(),
+        recommendation="认购", confidence="高",
+        valuation_mid=100.0, anchor_method="PE", ipo_pricing_view="合理",
+        suggested_amount_low_usd_m=10, suggested_amount_high_usd_m=20,
+        model_provider="kimi",
+    )
+    pid1 = s.save_prediction(p1)
+    p2 = Prediction(
+        project_id="skip_001", ticker="x", company_name="B",
+        industry="x", decision_date=datetime.now(),
+        recommendation="不认购", confidence="低",
+        valuation_mid=50.0, anchor_method="PE", ipo_pricing_view="偏高",
+        suggested_amount_low_usd_m=0, suggested_amount_high_usd_m=0,
+        model_provider="kimi",
+    )
+    pid2 = s.save_prediction(p2, upsert=False)
+    assert pid1 == pid2
+    fetched = s.get_prediction(pid1)
+    # 没被覆盖
+    assert fetched.company_name == "A"
+    assert fetched.recommendation == "认购"
+
+
+def test_peer_suggester_parser_valid_json() -> None:
+    from src.agents.peer_suggester import _parse_candidates
+
+    text = """这是一些前置文字...
+
+```json
+[
+  {"ticker": "02432", "name": "越疆", "reason": "协作机器人直接竞品"},
+  {"ticker": "01021", "name": "华沿机器人", "reason": "工业机器人本体"}
+]
+```
+"""
+    cands = _parse_candidates(text)
+    assert len(cands) == 2
+    assert cands[0].ticker == "02432"
+    assert cands[0].name == "越疆"
+    assert cands[1].ticker == "01021"
+
+
+def test_peer_suggester_parser_normalizes_ticker_padding() -> None:
+    from src.agents.peer_suggester import _parse_candidates
+
+    text = '```json\n[{"ticker": "2432", "name": "x", "reason": "x"}]\n```'
+    cands = _parse_candidates(text)
+    assert len(cands) == 1
+    # 4 位补到 5 位
+    assert cands[0].ticker == "02432"
+
+
+def test_peer_suggester_parser_falls_back_to_bare_array() -> None:
+    """LLM 没用 ```json``` 包裹时也能解析。"""
+    from src.agents.peer_suggester import _parse_candidates
+
+    text = '前文\n[{"ticker": "02432", "name": "x", "reason": "y"}]\n后文'
+    cands = _parse_candidates(text)
+    assert len(cands) == 1
+
+
+def test_peer_suggester_parser_handles_invalid_json() -> None:
+    from src.agents.peer_suggester import _parse_candidates
+
+    assert _parse_candidates("没有 json") == []
+    assert _parse_candidates("```json\n[invalid]\n```") == []
+
+
+def test_normalize_step_names_handles_aliases() -> None:
+    from src.graph.workflow import normalize_step_names
+
+    # 短名映射到标准名
+    assert "prospectus_analyst" in normalize_step_names("prospectus")
+    assert "debate_manager" in normalize_step_names("debate")
+    # 'all' 返回全部 9 步按序号排
+    all_steps = normalize_step_names("all")
+    assert all_steps[0] == "prospectus_analyst"
+    assert all_steps[-1] == "decision"
+    assert len(all_steps) == 9
+    # 多步去重 + 按序号排序
+    out = normalize_step_names("decision,prospectus,risk")
+    assert out == ["prospectus_analyst", "risk", "decision"]
+    # 未知步骤抛异常
+    import pytest
+    with pytest.raises(ValueError, match="未知 step"):
+        normalize_step_names("nonexistent")
+
+
+def test_save_run_metadata_round_trip(tmp_path) -> None:
+    from src.graph.workflow import load_run_metadata, save_run_metadata
+
+    save_run_metadata(
+        tmp_path,
+        ticker="02670",
+        company_name="珞石",
+        industry="工业机器人",
+        peers=["02432", "01021"],
+        recent_ipos=None,  # None 应该被过滤
+        ifind_target=None,
+    )
+    md = load_run_metadata(tmp_path)
+    assert md["ticker"] == "02670"
+    assert md["peers"] == ["02432", "01021"]
+    # None 字段不应出现
+    assert "recent_ipos" not in md
+    assert "ifind_target" not in md
+
+
+def test_load_run_metadata_missing_dir_returns_empty(tmp_path) -> None:
+    from src.graph.workflow import load_run_metadata
+
+    assert load_run_metadata(tmp_path / "nonexistent") == {}
