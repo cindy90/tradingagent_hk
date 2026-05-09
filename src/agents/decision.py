@@ -81,6 +81,7 @@ class DecisionAgent(BaseAgent):
     name = "decision"
     tier = ModelTier.DECIDE
     description = "最终基石投资决策 Agent"
+    fatal = True  # 决策失败 = 没有产出，整个流程白跑
 
     def run(self, ctx: AgentContext) -> AgentReport:
         briefs_text = _briefs_block(ctx.briefs)

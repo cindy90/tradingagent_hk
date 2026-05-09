@@ -170,6 +170,100 @@ def test_workflow_extras_typed_access() -> None:
     assert ex.misc["custom_field"] == "hello"
 
 
+def test_fatal_flag_default_and_subclasses() -> None:
+    from src.agents.decision import DecisionAgent
+    from src.agents.industry import IndustryAgent
+    from src.agents.prospectus_analyst import ProspectusAnalystAgent
+
+    assert ProspectusAnalystAgent.fatal is True
+    assert DecisionAgent.fatal is True
+    assert IndustryAgent.fatal is False  # 默认非致命
+
+
+def test_non_fatal_failure_injects_failure_brief(tmp_path) -> None:
+    """非致命 Agent 失败时，应在 ctx.briefs 写入显式"信息缺失"标记，
+    供下游 LLM 感知；不抛异常。"""
+    from pathlib import Path
+    from src.agents.base import AgentContext, BaseAgent, AgentReport
+    from src.agents.extras import WorkflowExtras
+    from src.graph.workflow import CornerstoneWorkflow
+    from src.llm import LLMClient
+    from src.llm.client import LLMResponse
+    from src.llm.router import ModelTier
+
+    class _MockProvider:
+        def complete(self, *, model, system, messages, max_tokens, temperature, cached_system_blocks):
+            return LLMResponse(text="ok", input_tokens=1, output_tokens=1, model=model)
+
+    class _FailingAgent(BaseAgent):
+        name = "failing"
+        tier = ModelTier.ANALYZE
+        description = "一个会失败的 Agent"
+        fatal = False
+
+        def run(self, ctx):
+            raise RuntimeError("simulated boom")
+
+    class _OkAgent(BaseAgent):
+        name = "ok"
+        tier = ModelTier.ANALYZE
+        description = "一个成功的 Agent"
+
+        def run(self, ctx):
+            ctx.briefs["ok"] = "ok brief"
+            return AgentReport(agent="ok", full_report="ok full", brief="ok brief")
+
+    llm = LLMClient(provider=_MockProvider(), provider_name="mock")
+    wf = CornerstoneWorkflow.__new__(CornerstoneWorkflow)
+    wf.llm = llm
+    wf.steps = [_FailingAgent(llm), _OkAgent(llm)]
+
+    ctx = AgentContext(
+        project_id="t",
+        ticker="00000",
+        company_name="测试",
+        industry="test",
+        reports_dir=tmp_path,
+        rag=None,
+        extras=WorkflowExtras(),
+    )
+
+    for i, agent in enumerate(wf.steps, start=1):
+        try:
+            r = agent.run(ctx)
+            ctx.briefs[agent.name] = r.brief
+        except Exception as e:
+            if agent.fatal:
+                raise
+            ctx.briefs[agent.name] = f"**[执行失败]** {type(e).__name__}"
+
+    assert "执行失败" in ctx.briefs["failing"]
+    assert ctx.briefs["ok"] == "ok brief"
+
+
+def test_fatal_failure_propagates() -> None:
+    from src.agents.base import AgentContext, BaseAgent
+    from src.agents.extras import WorkflowExtras
+    from pathlib import Path
+    import tempfile, pytest
+
+    class _FatalFail(BaseAgent):
+        name = "fatal"
+        fatal = True
+
+        def run(self, ctx):
+            raise RuntimeError("fatal error")
+
+    with tempfile.TemporaryDirectory() as d:
+        ctx = AgentContext(
+            project_id="t", ticker="00000", company_name="测试", industry="test",
+            reports_dir=Path(d), rag=None, extras=WorkflowExtras(),
+        )
+        agent = _FatalFail.__new__(_FatalFail)
+        with pytest.raises(RuntimeError, match="fatal error"):
+            agent.run(ctx)
+
+
 def test_workflow_extras_from_dict_routes_unknown_to_misc() -> None:
     from src.agents.extras import WorkflowExtras
 

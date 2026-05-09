@@ -50,6 +50,9 @@ class BaseAgent(ABC):
     name: str = "base"
     tier: ModelTier = ModelTier.ANALYZE
     description: str = ""
+    # fatal=True 时，该 Agent 失败会中止整个工作流；
+    # fatal=False 时，注入失败 brief 让下游 LLM 显式承认信息缺失。
+    fatal: bool = False
 
     def __init__(self, llm: LLMClient):
         self.llm = llm

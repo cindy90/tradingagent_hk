@@ -56,6 +56,7 @@ class ProspectusAnalystAgent(BaseAgent):
     name = "prospectus_analyst"
     tier = ModelTier.ANALYZE
     description = "招股书深度分析 Agent"
+    fatal = True  # 招股书分析失败时整个流程没意义，必须中止
 
     def __init__(self, llm, summarizer: Summarizer | None = None):
         super().__init__(llm)

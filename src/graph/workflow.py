@@ -155,21 +155,38 @@ class CornerstoneWorkflow:
         logger.info(f"=== 工作流启动: {ctx.project_id} ===")
 
         for i, agent in enumerate(self.steps, start=1):
-            logger.info(f"--- 步骤 {i}/{len(self.steps)}: {agent.name} ---")
+            fatal_tag = " (fatal)" if agent.fatal else ""
+            logger.info(f"--- 步骤 {i}/{len(self.steps)}: {agent.name}{fatal_tag} ---")
             try:
                 report = agent.run(ctx)
                 agent._save_full_report(ctx, i, report.full_report)
-                # 简报也单独落盘，便于审查
                 brief_path = ctx.reports_dir / f"{i:02d}_{agent.name}.brief.md"
                 brief_path.write_text(report.brief, encoding="utf-8")
             except Exception as e:
                 logger.exception(f"Agent {agent.name} 失败: {e}")
                 err_path = ctx.reports_dir / f"{i:02d}_{agent.name}.ERROR.md"
-                err_path.write_text(f"# {agent.name} 执行失败\n\n```\n{e}\n```\n", encoding="utf-8")
+                err_path.write_text(
+                    f"# {agent.name} 执行失败\n\n```\n{type(e).__name__}: {e}\n```\n",
+                    encoding="utf-8",
+                )
+                if agent.fatal:
+                    # 写出 token 账本后再抛，至少留下成本痕迹
+                    self._write_ledger(ctx)
+                    logger.error(f"致命 Agent [{agent.name}] 失败，工作流中止")
+                    raise
+                # 非致命：注入失败标记到 brief，下游 LLM 能明确感知信息缺失
+                ctx.briefs[agent.name] = (
+                    f"**[执行失败]** 本环节因 `{type(e).__name__}` 异常未产出有效内容。\n"
+                    f"信息缺失影响范围：{agent.description or agent.name}。\n"
+                    f"请在你的分析与决策中**显式承认这部分信息空白**，"
+                    f"不要凭空推断或假装拥有这部分数据。"
+                )
 
-        # token 使用账本
+        self._write_ledger(ctx)
+        logger.info(f"=== 工作流完成，报告目录: {ctx.reports_dir} ===")
+        return ctx
+
+    def _write_ledger(self, ctx: AgentContext) -> None:
         (ctx.reports_dir / "_token_usage.md").write_text(
             "# Token 使用账本\n\n" + self.llm.ledger.summary(), encoding="utf-8"
         )
-        logger.info(f"=== 工作流完成，报告目录: {ctx.reports_dir} ===")
-        return ctx
