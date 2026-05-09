@@ -1788,12 +1788,27 @@ def test_decision_schema_v3_supports_reasoning_chain() -> None:
              "calculation": "22 × 3.6 = 79",
              "conclusion": "基准估值 88 亿 HKD",
              "confidence": "中"},
+            {"step_no": 3, "title": "风险约束",
+             "premise": "风控独立审视",
+             "data_source": "risk: 综合 3.5",
+             "calculation": "客户集中风险 + kill switch",
+             "conclusion": "可控", "confidence": "中"},
+            {"step_no": 4, "title": "宏观窗口",
+             "premise": "macro 窗口判断",
+             "data_source": "macro: 4/5",
+             "calculation": "HSI 估值中性",
+             "conclusion": "窗口可发", "confidence": "中"},
+            {"step_no": 5, "title": "最终建议",
+             "premise": "综合推理",
+             "data_source": "decision: weighted 3.5",
+             "calculation": "加权 3.5 → 审慎参与",
+             "conclusion": "审慎参与", "confidence": "中"},
         ],
     }
     result, err = validate_decision(parsed)
     assert result is not None, f"v3 schema 校验失败: {err}"
     # 推理链
-    assert len(result.reasoning_chain) == 2
+    assert len(result.reasoning_chain) == 5
     assert result.reasoning_chain[0].title == "业务质量评估"
     assert result.reasoning_chain[0].caveats == ["客户集中度高"]
     # 关键假设
@@ -1992,7 +2007,7 @@ def test_decision_v4_weight_sum_warning(caplog) -> None:
     from src.agents.decision import validate_decision
 
     parsed = {
-        "recommendation": "认购",
+        "recommendation": "观望",  # 加权 2.0 → 观望 (P0.4 一致性硬约束)
         "confidence": "高",
         "suggested_amount_usd_million": [10.0, 20.0],
         "valuation_range_hkd_billion": {"mid": 80.0, "anchor_method": "PE", "anchor_logic": "x"},
@@ -2756,3 +2771,293 @@ def test_md_renders_listing_profile_section(tmp_path) -> None:
     assert "上市档案" in text
     assert "Main_Board_18C" in text
     assert "Robotics_Automation" in text
+
+
+# ============================================================================
+# P0/P1: 确定性引擎 + validate_decision 硬约束 测试
+# ============================================================================
+
+def test_valuation_engine_pe_method() -> None:
+    """ValuationEngine PE 方法单测: 倍数 × 净利 → 估值 (HKD)."""
+    from src.tools.valuation_engine import ValuationMethodInput, apply_method
+
+    inp = ValuationMethodInput(
+        method="PE", multiple=20.0, target_metric=5.0, weight=1.0,
+        rationale="peer PE 中位 20x", peer_basis="peer 中位 20x",
+        rmb_to_hkd=1.10,
+    )
+    result = apply_method(inp)
+    assert result.result_hkd_b is not None
+    # 20 × 5 = 100 RMB 亿 × 1.1 = 110 HKD 亿
+    assert abs(result.result_hkd_b - 110.0) < 0.01
+    assert "PE" in result.method
+
+
+def test_valuation_engine_compute_range_with_forbidden() -> None:
+    """compute_valuation_range 应跳过 forbidden 方法."""
+    from src.tools.valuation_engine import (
+        ValuationMethodInput, compute_valuation_range,
+    )
+
+    inputs = [
+        ValuationMethodInput(method="PS", multiple=20, target_metric=4, weight=0.5),
+        ValuationMethodInput(method="PE", multiple=30, target_metric=2, weight=0.5),
+    ]
+    rng = compute_valuation_range(inputs, forbidden_methods={"PE"})
+    # PE 被禁, 只剩 PS = 20 × 4 = 80 亿 RMB ≈ 88 HKD
+    valid = [r for r in rng.weighted_methods if r.result_hkd_b is not None]
+    assert len(valid) == 1
+    assert valid[0].method == "PS"
+    assert any("PE" in w for w in rng.overall_warnings)
+
+
+def test_sensitivity_engine_three_scenarios() -> None:
+    """SensitivityEngine 应输出悲观/基准/乐观三档, 概率和 ≈ 1.0."""
+    from src.tools.sensitivity_engine import BaseCase, compute_sensitivity_table
+
+    base = BaseCase(valuation_hkd_b=100.0, ps_multiple=22.0,
+                    valuation_at_ipo_hkd_b=100.0)
+    rows = compute_sensitivity_table(
+        base, listing_chapter="Main_Board_18C", size_tier="Large",
+    )
+    assert len(rows) == 3
+    names = [r.name for r in rows]
+    assert names == ["悲观", "基准", "乐观"]
+    # 概率和 = 1.0
+    total_p = sum(r.probability for r in rows)
+    assert abs(total_p - 1.0) < 0.01
+    # 悲观估值 < 基准 < 乐观
+    assert rows[0].valuation_hkd_b < rows[1].valuation_hkd_b < rows[2].valuation_hkd_b
+    # 推算路径必须有内容
+    assert rows[0].valuation_derivation
+    assert rows[2].valuation_derivation
+
+
+def test_risk_aggregator_extreme_low_caps_overall() -> None:
+    """RiskAggregator: 任一维度 score ≤ 1.5 时综合不超过 2.0."""
+    from src.tools.risk_aggregator import RiskItemInput, aggregate_risk_level
+
+    items = [
+        RiskItemInput(dimension="信用与财务造假", score=1.0),  # 极高风险
+        RiskItemInput(dimension="行业逆风", score=4.5),
+        RiskItemInput(dimension="估值高估与破发", score=4.0),
+    ]
+    result = aggregate_risk_level(items)
+    assert result.overall_risk_level <= 2.0
+    assert "extreme_low_capped" in result.aggregation_method or result.overall_risk_level <= 2.0
+    assert any("≤ 1.5" in w for w in result.warnings)
+
+
+def test_risk_aggregator_veto_caps_overall() -> None:
+    """RiskAggregator: veto_count ≥ 1 时综合也被压制."""
+    from src.tools.risk_aggregator import RiskItemInput, aggregate_risk_level
+
+    items = [
+        RiskItemInput(dimension="信用与财务造假", score=4.0),
+        RiskItemInput(dimension="估值高估与破发", score=3.5),
+    ]
+    result = aggregate_risk_level(items, veto_count=2)
+    assert result.overall_risk_level <= 2.0
+
+
+def test_risk_aggregator_consensus_low_minus_05() -> None:
+    """RiskAggregator: 3+ 维度 score ≤ 2.5 时综合再 -0.5."""
+    from src.tools.risk_aggregator import RiskItemInput, aggregate_risk_level
+
+    items = [
+        RiskItemInput(dimension="行业逆风", score=2.0),
+        RiskItemInput(dimension="流动性", score=2.5),
+        RiskItemInput(dimension="ESG", score=2.0),
+        RiskItemInput(dimension="信用与财务造假", score=4.0),
+    ]
+    result = aggregate_risk_level(items)
+    # raw_avg ≈ (2+2.5+2+4)*权重均匀 → 应触发 consensus_low (-0.5)
+    assert result.overall_risk_level < result.raw_weighted_avg
+    assert any("3+ 维度低分" in w or "低分共识" in w for w in result.warnings)
+
+
+def test_validate_decision_p04_recommendation_consistency() -> None:
+    """P0.4: weighted_total_score 与 recommendation 不一致应触发硬约束。"""
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "认购",  # 但加权 = 3.0 应映射 "审慎参与"
+        "confidence": "高",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {"mid": 80.0, "anchor_method": "PE",
+                                         "anchor_logic": "x"},
+        "ipo_pricing_view": "合理",
+        "key_supports": ["x"], "key_risks": ["y"],
+        "decision_weights": [
+            {"factor": "估值合理性", "weight": 1.0, "score": 3.0, "rationale": "x"},
+        ],
+    }
+    result, err = validate_decision(parsed, strict=True)
+    assert result is None
+    assert "认购" in err and ("审慎参与" in err or "一致" in err)
+
+
+def test_validate_decision_p04_consistency_passes_when_aligned() -> None:
+    """P0.4: 一致时应通过."""
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "审慎参与",
+        "confidence": "中",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {"mid": 80.0, "anchor_method": "PE",
+                                         "anchor_logic": "x"},
+        "ipo_pricing_view": "合理",
+        "key_supports": ["x"], "key_risks": ["y"],
+        "decision_weights": [
+            {"factor": "估值合理性", "weight": 1.0, "score": 3.5, "rationale": "x"},
+        ],
+        "reasoning_chain": [
+            {"step_no": i, "title": f"step{i}", "premise": "p",
+             "data_source": "ds", "calculation": "c", "conclusion": "k"}
+            for i in range(1, 6)
+        ],
+    }
+    result, err = validate_decision(parsed, strict=True)
+    assert result is not None, f"应通过: {err}"
+
+
+def test_validate_decision_p15_forbidden_methods() -> None:
+    """P1.5: ListingProfile 禁用方法不能出现在 methodology_breakdown (18A 禁 PE)."""
+    from src.agents.decision import validate_decision
+    from src.agents.listing_profile import ListingProfile
+
+    profile = ListingProfile(
+        listing_chapter="Main_Board_18A", size_tier="Mid",
+        industry_theme="Bio_Pharma",
+        profitability_stage="Pre_Commercial",
+    )
+    parsed = {
+        "recommendation": "审慎参与",
+        "confidence": "中",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {
+            "mid": 50.0, "anchor_method": "PE",
+            "anchor_logic": "x",
+            "methodology_breakdown": [
+                {"method": "PE", "peer_basis": "x", "target_metric": "y",
+                 "formula": "x", "result_hkd_b": 50, "weight": 1.0},
+            ],
+        },
+        "ipo_pricing_view": "合理",
+        "key_supports": ["x"], "key_risks": ["y"],
+        "reasoning_chain": [
+            {"step_no": i, "title": f"step{i}", "premise": "p",
+             "data_source": "ds", "calculation": "c", "conclusion": "k"}
+            for i in range(1, 6)
+        ],
+    }
+    result, err = validate_decision(parsed, listing_profile=profile, strict=True)
+    assert result is None
+    assert "PE" in err and ("禁用" in err or "forbidden" in err.lower())
+
+
+def test_validate_decision_p16_reasoning_chain_min_length() -> None:
+    """P1.6: reasoning_chain < 5 步应触发硬约束."""
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "审慎参与",
+        "confidence": "中",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {"mid": 80.0, "anchor_method": "PE",
+                                         "anchor_logic": "x"},
+        "ipo_pricing_view": "合理",
+        "key_supports": ["x"], "key_risks": ["y"],
+        "reasoning_chain": [
+            {"step_no": 1, "title": "x", "premise": "p", "data_source": "d",
+             "calculation": "c", "conclusion": "k"},
+            {"step_no": 2, "title": "x", "premise": "p", "data_source": "d",
+             "calculation": "c", "conclusion": "k"},
+        ],
+    }
+    result, err = validate_decision(parsed, strict=True)
+    assert result is None
+    assert "5 步" in err or "至少 5" in err
+
+
+def test_validate_decision_p17_extra_risk_coverage() -> None:
+    """P1.7: ListingProfile 要求的 extra_risk_dimensions 必须被覆盖."""
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "审慎参与",
+        "confidence": "中",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {"mid": 80.0, "anchor_method": "PE",
+                                         "anchor_logic": "x"},
+        "ipo_pricing_view": "合理",
+        "key_supports": ["流动性 OK"],
+        "key_risks": ["x", "y"],  # 没有提及临床
+        "reasoning_chain": [
+            {"step_no": i, "title": f"step{i}", "premise": "p",
+             "data_source": "ds", "calculation": "c", "conclusion": "k"}
+            for i in range(1, 6)
+        ],
+    }
+    result, err = validate_decision(
+        parsed,
+        extra_risk_dim_names=["临床试验失败风险", "专利与商业化时间窗"],
+        strict=True,
+    )
+    assert result is None
+    assert "临床" in err or "覆盖" in err
+
+
+def test_comparable_agent_engine_anchor_block() -> None:
+    """ComparableAgent 应在 prompt 中注入引擎确定性估值锚定块."""
+    from src.agents.comparable import _build_engine_anchor
+
+    target = {"name": "T", "thscode": "X.HK", "revenue": 360e6, "net_profit": 50e6}
+    peers = [
+        {"name": "P1", "pe_ttm": 30.0, "ps_ttm": 22.0, "pb_latest": 4.0},
+        {"name": "P2", "pe_ttm": 25.0, "ps_ttm": 18.0, "pb_latest": 3.5},
+    ]
+    md, summary = _build_engine_anchor(
+        target, peers, target_revenue=3.6, target_net_profit=0.5,
+        listing_profile=None,
+    )
+    assert summary is not None
+    assert summary["mid"] is not None
+    assert summary["mid"] > 0
+    assert "引擎确定性估值锚定" in md
+    # 至少包含 PS 和 PE 两种方法
+    assert any(m["method"] == "PS" for m in summary["methods"])
+
+
+def test_comparable_agent_engine_anchor_no_inputs() -> None:
+    """缺少 target metric 时应返回 None summary, 不崩."""
+    from src.agents.comparable import _build_engine_anchor
+
+    md, summary = _build_engine_anchor(
+        target=None, peers=[], target_revenue=None, target_net_profit=None,
+        listing_profile=None,
+    )
+    assert summary is None
+    assert "输入不足" in md
+
+
+def test_decision_engine_sensitivity_in_extras() -> None:
+    """DecisionAgent 应在成功后把引擎敏感性写入 ctx.extras.misc['engine_sensitivity']."""
+    # 直接验证 sensitivity_engine 工作 (不跑整个 LLM agent)
+    from src.tools.sensitivity_engine import BaseCase, compute_sensitivity_table
+
+    rows = compute_sensitivity_table(
+        BaseCase(valuation_hkd_b=80.0, ps_multiple=22.0,
+                 valuation_at_ipo_hkd_b=80.0),
+        listing_chapter="Main_Board_18A",  # 18A 高波动
+        size_tier="Mid",
+    )
+    # 18A 波动放大 1.4 → 悲观估值跌幅更深 vs 标准
+    rows_std = compute_sensitivity_table(
+        BaseCase(valuation_hkd_b=80.0, ps_multiple=22.0,
+                 valuation_at_ipo_hkd_b=80.0),
+        listing_chapter="Main_Board_Standard",
+        size_tier="Mid",
+    )
+    assert rows[0].valuation_hkd_b < rows_std[0].valuation_hkd_b

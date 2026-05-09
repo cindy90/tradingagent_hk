@@ -1,10 +1,13 @@
 """风控委员会 Agent。综合所有研究 + 辩论结论，从风险维度独立审视。"""
 from __future__ import annotations
 
+from loguru import logger
+
 from src.agents._template import TemplateAgent, briefs_context
-from src.agents.base import AgentContext
+from src.agents.base import AgentContext, AgentReport
 from src.feedback.models import RiskScoreCard
 from src.llm import ModelTier
+from src.tools.risk_aggregator import RiskItemInput, aggregate_risk_level
 
 SYSTEM = """你是基石投资委员会的风控总监，独立于研究端。基于所有研究 Agent 简报和 Bull/Bear 辩论结论，
 风格对标顶级投行的风控独立审批: 量化、可证伪、有早期预警信号。
@@ -126,3 +129,48 @@ class RiskAgent(TemplateAgent):
             f"其'应额外纳入风控评估的风险维度'章节中列出的每一项 (例如 18A 必须评估"
             f"临床失败风险, AH 双重必须评估 A-H 折价收敛风险)。"
         )
+
+    def run(self, ctx: AgentContext) -> AgentReport:
+        """重载 run: super 跑完后再用 RiskAggregator 做确定性聚合, 写回 ctx.extras。"""
+        report = super().run(ctx)
+        try:
+            cards = ctx.extras.misc.get("score_cards", {})
+            risk_card = cards.get(self.name)
+            if not risk_card:
+                return report
+
+            # 优先用 detailed_risks (含 dimension/score), 退而用 risk_dimensions dict
+            items: list[RiskItemInput] = []
+            for d in risk_card.get("detailed_risks") or []:
+                dim = d.get("dimension")
+                score = d.get("score")
+                if dim and score is not None:
+                    items.append(RiskItemInput(
+                        dimension=dim,
+                        score=float(score),
+                        probability=d.get("probability", "中"),
+                        impact=d.get("impact", "中"),
+                        early_warning=d.get("early_warning") or [],
+                    ))
+            if not items:
+                for dim, score in (risk_card.get("risk_dimensions") or {}).items():
+                    if score is not None:
+                        items.append(RiskItemInput(
+                            dimension=dim, score=float(score),
+                        ))
+
+            if not items:
+                return report
+
+            veto_count = len(risk_card.get("veto_conditions") or [])
+            agg = aggregate_risk_level(items, veto_count=veto_count)
+            ctx.extras.misc["engine_risk_aggregate"] = {
+                "overall_risk_level": agg.overall_risk_level,
+                "raw_weighted_avg": agg.raw_weighted_avg,
+                "aggregation_method": agg.aggregation_method,
+                "warnings": agg.warnings,
+                "contributing_factors": agg.contributing_factors,
+            }
+        except Exception as exc:
+            logger.warning(f"[Risk] RiskAggregator 后处理失败: {exc}")
+        return report

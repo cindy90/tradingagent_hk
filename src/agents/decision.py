@@ -725,22 +725,110 @@ def parse_decision_json(text: str) -> dict[str, Any] | None:
         return None
 
 
-def validate_decision(parsed: dict[str, Any] | None) -> tuple[DecisionResult | None, str]:
-    """返回 (model, error_message)；error_message 非空表示校验失败。"""
+def validate_decision(
+    parsed: dict[str, Any] | None,
+    *,
+    listing_profile: Any = None,
+    extra_risk_dim_names: list[str] | None = None,
+    strict: bool = True,
+) -> tuple[DecisionResult | None, str]:
+    """校验 LLM 输出的决议 JSON.
+
+    Args:
+        parsed: LLM 输出 JSON
+        listing_profile: 当前项目 ListingProfile (用于估值方法禁用清单 / 额外风险维度强制覆盖)
+        extra_risk_dim_names: 必须覆盖的风险维度名 (来自 listing_profile.extra_risk_dimensions)
+        strict: True (默认) 时硬约束触发返 None 让 retry; False 时仅 warning
+
+    Returns: (model, error_message)；error_message 非空表示校验失败 (retry 时用)。
+    """
     if parsed is None:
         return None, "无法从输出中提取 ```json``` 代码块。"
     try:
         result = DecisionResult.model_validate(parsed)
     except ValidationError as e:
         return None, str(e)
-    # 软校验：枚举值不强制，但记录警告
+
     warnings: list[str] = []
+    hard_errors: list[str] = []
+
+    # ---------- 软校验: 枚举值 ----------
     if result.recommendation not in _REC_VALUES:
         warnings.append(f"recommendation 应为 {_REC_VALUES}，得到 '{result.recommendation}'")
     if result.confidence not in _CONF_VALUES:
         warnings.append(f"confidence 应为 {_CONF_VALUES}，得到 '{result.confidence}'")
     if result.ipo_pricing_view not in _PRICING_VALUES:
         warnings.append(f"ipo_pricing_view 应为 {_PRICING_VALUES}，得到 '{result.ipo_pricing_view}'")
+
+    # ---------- P1.4 硬约束: weighted_total → recommendation 一致性 ----------
+    if (
+        result.decision_weights
+        and result.weighted_total_score is not None
+        and result.recommendation in _REC_VALUES
+    ):
+        expected_rec = map_score_to_recommendation(result.weighted_total_score)
+        if expected_rec != result.recommendation:
+            hard_errors.append(
+                f"加权总分 {result.weighted_total_score:.2f} 映射到 '{expected_rec}', "
+                f"但 recommendation 给的是 '{result.recommendation}'。两者必须一致 — "
+                f"要么调整加权打分让总分落在 '{result.recommendation}' 区间, "
+                f"要么把 recommendation 改为 '{expected_rec}'。"
+            )
+
+    # ---------- P1.5 硬约束: 估值方法禁用清单 ----------
+    if listing_profile is not None:
+        try:
+            from src.tools.valuation_engine import select_methods_by_profile
+            sel = select_methods_by_profile(listing_profile)
+            forbidden = sel.get("forbidden", set())
+            used_methods = {
+                m.method.upper().strip()
+                for m in result.valuation_range_hkd_billion.methodology_breakdown
+                if m.method
+            }
+            forbidden_upper = {x.upper().strip() for x in forbidden}
+            violations = used_methods & forbidden_upper
+            if violations:
+                hard_errors.append(
+                    f"上市档案 ({getattr(listing_profile, 'listing_chapter', '')}) 禁用方法 "
+                    f"{forbidden}, 但 methodology_breakdown 使用了 {violations}。"
+                    f"请改用主用方法 {sel.get('primary', set())}。"
+                )
+        except Exception:
+            pass  # ListingProfile 解析异常时不阻塞
+
+    # ---------- P1.6 硬约束: reasoning_chain 最少 5 步 ----------
+    if result.reasoning_chain and len(result.reasoning_chain) < 5:
+        hard_errors.append(
+            f"reasoning_chain 仅 {len(result.reasoning_chain)} 步, 必须至少 5 步 "
+            f"(覆盖业务质量/估值起点/风险约束/宏观窗口/最终建议等关键推理点)。"
+        )
+
+    # ---------- P1.7 硬约束: risk 覆盖 ListingProfile 的 extra_risks ----------
+    if extra_risk_dim_names:
+        # 收集 LLM 给出的风险维度名
+        llm_dims_text = " ".join(result.key_risks)  # key_risks 是文本列表
+        # 也检查 reasoning_chain 中是否提及
+        for step in result.reasoning_chain:
+            llm_dims_text += " " + step.title + " " + step.conclusion
+        missing = []
+        for dim in extra_risk_dim_names:
+            # 取核心关键字 (去掉"风险"等通用后缀) 做模糊匹配
+            core_kw = dim.replace("风险", "").replace("评估", "").strip()[:6]
+            if core_kw and core_kw not in llm_dims_text:
+                missing.append(dim)
+        if missing:
+            hard_errors.append(
+                f"上市档案要求覆盖 {len(extra_risk_dim_names)} 个特殊风险维度, "
+                f"但 key_risks + reasoning_chain 未提及: {missing}。请显式增加。"
+            )
+
+    if hard_errors and strict:
+        # 硬约束触发, 返 None 让 LLM retry
+        return None, "硬约束违反:\n" + "\n".join(f"- {e}" for e in hard_errors)
+
+    if hard_errors:
+        warnings.extend(hard_errors)
     return result, "; ".join(warnings)
 
 
@@ -757,11 +845,19 @@ class DecisionAgent(BaseAgent):
         )
         # ListingProfile 注入（决定调权 / 估值方法 / 风险维度的硬约束）
         profile_block = ""
+        listing_profile = getattr(ctx.extras, "listing_profile", None)
+        extra_risk_dim_names: list[str] = []
         try:
-            from src.agents.listing_profile import render_profile_for_prompt
-            profile_block = render_profile_for_prompt(
-                getattr(ctx.extras, "listing_profile", None)
+            from src.agents.listing_profile import (
+                render_profile_for_prompt,
+                extra_risk_dimensions,
             )
+            profile_block = render_profile_for_prompt(listing_profile)
+            if listing_profile is not None:
+                extra_risk_dim_names = [
+                    d.get("dimension", "") for d in extra_risk_dimensions(listing_profile)
+                    if d.get("dimension")
+                ]
         except Exception:
             pass
 
@@ -789,7 +885,11 @@ class DecisionAgent(BaseAgent):
         )
         full = resp.text
         parsed = parse_decision_json(full)
-        result, err = validate_decision(parsed)
+        result, err = validate_decision(
+            parsed,
+            listing_profile=listing_profile,
+            extra_risk_dim_names=extra_risk_dim_names or None,
+        )
 
         # 第一次校验失败：把 error message 塞回给 LLM 让它重试一次
         if result is None:
@@ -816,9 +916,53 @@ class DecisionAgent(BaseAgent):
             )
             full = resp2.text
             parsed = parse_decision_json(full)
-            result, err = validate_decision(parsed)
+            result, err = validate_decision(
+                parsed,
+                listing_profile=listing_profile,
+                extra_risk_dim_names=extra_risk_dim_names or None,
+            )
             if result is None:
                 logger.error(f"决议 JSON 重试仍失败: {err[:300]}")
+
+        # SensitivityEngine 后处理：用引擎从 base case 重算三档情景, 作为可审计 anchor
+        if result is not None:
+            try:
+                from src.tools.sensitivity_engine import (
+                    BaseCase,
+                    compute_sensitivity_table,
+                )
+                base_mid = result.valuation_range_hkd_billion.mid
+                base_case = BaseCase(
+                    valuation_hkd_b=float(base_mid),
+                    valuation_at_ipo_hkd_b=float(base_mid),
+                )
+                listing_chapter = (
+                    getattr(listing_profile, "listing_chapter", "Unknown")
+                    if listing_profile else "Unknown"
+                )
+                size_tier = (
+                    getattr(listing_profile, "size_tier", "Unknown")
+                    if listing_profile else "Unknown"
+                )
+                engine_rows = compute_sensitivity_table(
+                    base_case,
+                    listing_chapter=listing_chapter,
+                    size_tier=size_tier,
+                )
+                ctx.extras.misc["engine_sensitivity"] = [
+                    {
+                        "name": r.name,
+                        "valuation_hkd_b": r.valuation_hkd_b,
+                        "probability": r.probability,
+                        "expected_return_pct": r.expected_return_pct,
+                        "valuation_derivation": r.valuation_derivation,
+                        "probability_rationale": r.probability_rationale,
+                        "triggers": r.triggers,
+                    }
+                    for r in engine_rows
+                ]
+            except Exception as exc:
+                logger.warning(f"[Decision] SensitivityEngine 后处理失败: {exc}")
 
         # 构造给人看的 brief（也是 ledger 落盘的前 N 字）
         if result is not None:

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import statistics
+
 from src.agents._template import TemplateAgent
 from src.agents.base import AgentContext
 from src.feedback.models import ComparableScoreCard
 from src.llm import ModelTier
 from src.tools.valuation import comparable_valuation
+from src.tools.valuation_engine import (
+    ValuationMethodInput,
+    compute_valuation_range,
+    select_methods_by_profile,
+)
 
 SYSTEM = """你是港股 IPO 估值分析师，专门做可比公司估值。基于：
 - 目标公司财务数据（营收/净利润/毛利率/PE-PS-PB 等估值倍数, 来自 iFinD 实时拉取）
@@ -172,6 +179,109 @@ def _render_fundamentals_md(target: dict | None, peers: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _median(values: list) -> float | None:
+    """Median of non-None numeric values; None if empty."""
+    nums = [float(v) for v in values if v is not None]
+    if not nums:
+        return None
+    return float(statistics.median(nums))
+
+
+def _build_engine_anchor(
+    target: dict | None,
+    peers: list[dict],
+    target_revenue: float | None,
+    target_net_profit: float | None,
+    listing_profile,
+) -> tuple[str, dict | None]:
+    """Pre-compute deterministic engine valuation as an anchor for the LLM.
+
+    Returns: (markdown_block, engine_summary_dict_or_None)
+    """
+    # Median peer multiples (peers list of dicts)
+    peer_pe = _median([p.get("pe_ttm") for p in peers])
+    peer_ps = _median([p.get("ps_ttm") for p in peers])
+    peer_pb = _median([p.get("pb_latest") for p in peers])
+
+    # Forbidden methods from ListingProfile (e.g. 18A 禁 PE)
+    sel = select_methods_by_profile(listing_profile)
+    forbidden = sel.get("forbidden", set())
+    primary = sel.get("primary", set())
+
+    inputs: list[ValuationMethodInput] = []
+    if peer_ps and target_revenue and target_revenue > 0:
+        inputs.append(ValuationMethodInput(
+            method="PS", multiple=peer_ps, target_metric=target_revenue,
+            weight=0.5, peer_basis=f"peer PS 中位 {peer_ps:.2f}x",
+            rationale="peer PS 中位 × target 营收",
+        ))
+    if peer_pe and target_net_profit and target_net_profit > 0:
+        inputs.append(ValuationMethodInput(
+            method="PE", multiple=peer_pe, target_metric=target_net_profit,
+            weight=0.4, peer_basis=f"peer PE 中位 {peer_pe:.2f}x",
+            rationale="peer PE 中位 × target 净利",
+        ))
+    if peer_pb and target and target.get("net_assets"):
+        try:
+            na = float(target["net_assets"])
+            if na > 0:
+                inputs.append(ValuationMethodInput(
+                    method="PB", multiple=peer_pb, target_metric=na,
+                    weight=0.1, peer_basis=f"peer PB 中位 {peer_pb:.2f}x",
+                    rationale="peer PB 中位 × target 净资产",
+                ))
+        except (TypeError, ValueError):
+            pass
+
+    if not inputs:
+        return ("（引擎确定性估值: 输入不足, 无法预算 — 需 peer PE/PS 中位 + target 营收/净利）",
+                None)
+
+    rng = compute_valuation_range(inputs, forbidden_methods=forbidden)
+
+    lines = [
+        "**[引擎确定性估值锚定]** ⚙️ — 由 ValuationEngine 用 peer 中位倍数 + target 财务"
+        "确定性算出, 不允许偏差超过 ±15% 除非显式说明。",
+        "",
+        f"- low / mid / high: {rng.low_hkd_b} / **{rng.mid_hkd_b}** / {rng.high_hkd_b} 亿 HKD",
+        f"- anchor_method: {rng.anchor_method}",
+        f"- 权重之和: {rng.sum_of_weights}",
+    ]
+    if primary:
+        lines.append(f"- ListingProfile 推荐主用方法: {sorted(primary)}")
+    if forbidden:
+        lines.append(f"- ListingProfile 禁用方法: {sorted(forbidden)}")
+    lines.append("")
+    lines.append("| 方法 | 倍数/输入 | 公式 | 结果 (亿 HKD) | 权重 |")
+    lines.append("|---|---|---|---|---|")
+    for r in rng.weighted_methods:
+        lines.append(
+            f"| {r.method} | {r.peer_basis} | `{r.formula}` | "
+            f"{r.result_hkd_b if r.result_hkd_b is not None else '—'} | {r.weight} |"
+        )
+    if rng.overall_warnings:
+        lines.append("")
+        lines.append("引擎警告:")
+        for w in rng.overall_warnings:
+            lines.append(f"- {w}")
+
+    summary = {
+        "low": rng.low_hkd_b,
+        "mid": rng.mid_hkd_b,
+        "high": rng.high_hkd_b,
+        "anchor_method": rng.anchor_method,
+        "methods": [
+            {"method": r.method, "result_hkd_b": r.result_hkd_b,
+             "weight": r.weight, "formula": r.formula}
+            for r in rng.weighted_methods
+        ],
+        "warnings": rng.overall_warnings,
+        "primary_methods": sorted(primary),
+        "forbidden_methods": sorted(forbidden),
+    }
+    return ("\n".join(lines), summary)
+
+
 def _render_quotes_md(rows: list[dict]) -> str:
     if not rows:
         return "（未提供可比公司近期行情）"
@@ -251,6 +361,16 @@ class ComparableAgent(TemplateAgent):
         quotes_md = _render_quotes_md(ctx.extras.peer_recent_quotes)
         offering_block = self._extract_offering_block(ctx)
 
+        # 引擎确定性估值锚定 — 用 peer 中位倍数 + target 财务确定性算出
+        engine_anchor_md, engine_summary = _build_engine_anchor(
+            target, peers,
+            ctx.extras.target_revenue,
+            ctx.extras.target_net_profit,
+            getattr(ctx.extras, "listing_profile", None),
+        )
+        if engine_summary is not None:
+            ctx.extras.misc["engine_valuation"] = engine_summary
+
         # ListingProfile 注入: 强约束估值方法
         profile_block = ""
         try:
@@ -272,6 +392,7 @@ class ComparableAgent(TemplateAgent):
             f"# 可比公司近期行情（来自 iFinD THS_HQ）\n{quotes_md}\n\n"
             f"# PE 估值结果（基于上方 PE 倍数）\n{pe_val if pe_val else '（无 PE 输入或 target 净利为 0/亏损）'}\n\n"
             f"# PS 估值结果（基于上方 PS 倍数）\n{ps_val if ps_val else '（无 PS 输入或 target 营收为 0）'}\n\n"
+            f"# 引擎确定性估值锚定 ⚙️ (你的 mid 估值偏离 > 15% 必须显式说明原因)\n{engine_anchor_md}\n\n"
             f"请输出可比公司估值分析。\n\n"
             f"**重要**: 如果上方有 # 上市档案 块, 你的 methodology_breakdown 必须使用其推荐的"
             f"主用估值方法 (例如 18A 必须用 rNPV / Peak Sales; AH 双重必须用 A-H 折价锚定)。"
