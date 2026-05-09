@@ -18,6 +18,7 @@ from typing import Any
 
 from loguru import logger
 
+from src.agents.extras import WorkflowExtras
 from src.data.rag import ProspectusRAG
 from src.llm import LLMClient, ModelTier
 
@@ -33,7 +34,7 @@ class AgentContext:
     rag: ProspectusRAG | None = None
     briefs: dict[str, str] = field(default_factory=dict)
     full_reports: dict[str, str] = field(default_factory=dict)
-    extras: dict[str, Any] = field(default_factory=dict)
+    extras: WorkflowExtras = field(default_factory=WorkflowExtras)
     cached_blocks: list[str] = field(default_factory=list)
 
 

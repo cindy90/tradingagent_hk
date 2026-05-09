@@ -33,7 +33,7 @@ class IndustryAgent(TemplateAgent):
             )
 
         # 同花顺行业研报：只取标题/券商/评级/摘要，不喂全文
-        research = ctx.extras.get("industry_research") or []
+        research = ctx.extras.industry_research
         research_block = ""
         if research:
             items = []

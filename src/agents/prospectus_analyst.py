@@ -82,7 +82,7 @@ class ProspectusAnalystAgent(BaseAgent):
 
     def run(self, ctx: AgentContext) -> AgentReport:
         evidence = self._gather_evidence(ctx)
-        basic = ctx.extras.get("company_basic") or {}
+        basic = ctx.extras.company_basic
         basic_block = ""
         if basic:
             lines = [f"- {k}: {v}" for k, v in basic.items() if v not in (None, "", "--")]

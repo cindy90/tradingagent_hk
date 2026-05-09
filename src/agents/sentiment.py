@@ -22,8 +22,8 @@ class SentimentAgent(TemplateAgent):
     SYSTEM = SYSTEM
 
     def build_user_message(self, ctx: AgentContext) -> str:
-        peers_quotes = ctx.extras.get("peer_recent_quotes", [])
-        recent_ipos = ctx.extras.get("recent_hk_ipos", [])
+        peers_quotes = ctx.extras.peer_recent_quotes
+        recent_ipos = ctx.extras.recent_hk_ipos
         return (
             f"# 项目\n{ctx.company_name} ({ctx.ticker})  行业: {ctx.industry}\n\n"
             f"# 可比公司近期行情\n{peers_quotes}\n\n"

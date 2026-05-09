@@ -33,6 +33,7 @@ from src.agents.risk import RiskAgent
 from src.agents.sentiment import SentimentAgent
 from src.agents.summarizer import Summarizer
 from src.agents.tech_trend import TechTrendAgent
+from src.agents.extras import WorkflowExtras
 from src.data.prospectus import ProspectusLoader
 from src.data.rag import ProspectusRAG
 from src.data.ths_client import THSClient
@@ -104,7 +105,7 @@ class CornerstoneWorkflow:
         company_name: str,
         industry: str,
         prospectus_pdf: str | Path | None,
-        extras: dict | None = None,
+        extras: WorkflowExtras | None = None,
     ) -> AgentContext:
         s = get_settings()
         project_id = f"{ticker}_{datetime.now():%Y%m%d_%H%M%S}"
@@ -135,7 +136,7 @@ class CornerstoneWorkflow:
             reports_dir=reports_dir,
             rag=rag,
             cached_blocks=cached_blocks,
-            extras=extras or {},
+            extras=extras or WorkflowExtras(),
         )
 
     def run(
@@ -147,11 +148,10 @@ class CornerstoneWorkflow:
         prospectus_pdf: str | Path | None = None,
         extras: dict | None = None,
     ) -> AgentContext:
-        merged_extras = dict(extras or {})
         prefetched = self._prefetch_ths(ticker, industry)
-        merged_extras.update(prefetched)
+        wf_extras = WorkflowExtras.from_dict({**(extras or {}), **prefetched})
 
-        ctx = self._build_ctx(ticker, company_name, industry, prospectus_pdf, merged_extras)
+        ctx = self._build_ctx(ticker, company_name, industry, prospectus_pdf, wf_extras)
         logger.info(f"=== 工作流启动: {ctx.project_id} ===")
 
         for i, agent in enumerate(self.steps, start=1):

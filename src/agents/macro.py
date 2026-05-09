@@ -25,7 +25,7 @@ class MacroAgent(TemplateAgent):
 
     def build_user_message(self, ctx: AgentContext) -> str:
         hsi = get_hsi_index()
-        macro = ctx.extras.get("macro_indicators", {}) or {}
+        macro = ctx.extras.macro_indicators
 
         # 把 EDB 时间序列压缩为"最新值 / 6 个月前 / 12 个月前 / 趋势"，省 token
         macro_lines = []

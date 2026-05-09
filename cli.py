@@ -92,7 +92,7 @@ def analyze(
     final_path = write_final_summary(ctx)
     console.print(f"\n[green]✓ 完成。投决备忘录:[/green] {final_path}")
     console.print(f"[green]  分项报告目录:[/green] {ctx.reports_dir}")
-    decision = ctx.extras.get("decision_json")
+    decision = ctx.extras.decision_json
     if decision:
         console.print("\n[bold]核心决议:[/bold]")
         console.print(decision)

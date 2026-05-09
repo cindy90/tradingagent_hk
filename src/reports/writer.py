@@ -8,7 +8,7 @@ from src.agents.base import AgentContext
 
 
 def write_final_summary(ctx: AgentContext) -> Path:
-    decision_json = ctx.extras.get("decision_json") or {}
+    decision_json = ctx.extras.decision_json or {}
     decision_json_str = json.dumps(decision_json, ensure_ascii=False, indent=2) if decision_json else "{}"
 
     brief_section = "\n\n".join(

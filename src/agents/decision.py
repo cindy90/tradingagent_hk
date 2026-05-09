@@ -117,7 +117,7 @@ class DecisionAgent(BaseAgent):
 
         ctx.full_reports[self.name] = full
         ctx.briefs[self.name] = brief
-        ctx.extras["decision_json"] = decision_json
+        ctx.extras.decision_json = decision_json
 
         return AgentReport(
             agent=self.name,

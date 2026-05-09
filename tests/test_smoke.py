@@ -155,6 +155,34 @@ def test_llm_client_with_mock_provider() -> None:
     assert client.ledger.by_tier["analyze"]["calls"] == 1
 
 
+def test_workflow_extras_typed_access() -> None:
+    """WorkflowExtras 已知字段属性访问，未知字段 fallback 到 misc。"""
+    from src.agents.extras import WorkflowExtras
+
+    ex = WorkflowExtras()
+    ex.peer_pe_multiples = [10.0, 12.0, 15.0]
+    ex.set("custom_field", "hello")
+
+    assert ex.peer_pe_multiples == [10.0, 12.0, 15.0]
+    assert ex.get("peer_pe_multiples") == [10.0, 12.0, 15.0]
+    assert ex.get("nonexistent_key", default="dft") == "dft"
+    assert ex.get("custom_field") == "hello"
+    assert ex.misc["custom_field"] == "hello"
+
+
+def test_workflow_extras_from_dict_routes_unknown_to_misc() -> None:
+    from src.agents.extras import WorkflowExtras
+
+    ex = WorkflowExtras.from_dict({
+        "company_basic": {"name": "test"},
+        "industry_research": [{"title": "r1"}],
+        "totally_unknown_key": [1, 2, 3],
+    })
+    assert ex.company_basic == {"name": "test"}
+    assert ex.industry_research == [{"title": "r1"}]
+    assert ex.misc["totally_unknown_key"] == [1, 2, 3]
+
+
 def test_openai_compat_provider_merges_system_into_messages() -> None:
     """验证 _OpenAICompatProvider 把 system + cached_system_blocks 合并到 messages[0]."""
     from src.llm.client import _OpenAICompatProvider, LLMResponse

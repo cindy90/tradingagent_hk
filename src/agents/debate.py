@@ -97,7 +97,7 @@ class DebateOrchestrator(BaseAgent):
 
         ctx.full_reports[self.name] = manager_full
         ctx.briefs[self.name] = manager_brief
-        ctx.extras["debate_outcome"] = DebateOutcome(
+        ctx.extras.debate_outcome = DebateOutcome(
             rounds=len(bull_history),
             bull_history=bull_history,
             bear_history=bear_history,

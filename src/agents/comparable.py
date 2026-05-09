@@ -31,10 +31,10 @@ class ComparableAgent(TemplateAgent):
     SYSTEM = SYSTEM
 
     def build_user_message(self, ctx: AgentContext) -> str:
-        peers = ctx.extras.get("peers", [])
-        target_metric = ctx.extras.get("target_net_profit") or ctx.extras.get("target_revenue") or 0
-        peer_pe = ctx.extras.get("peer_pe_multiples", [])
-        peer_ps = ctx.extras.get("peer_ps_multiples", [])
+        peers = ctx.extras.peers
+        target_metric = ctx.extras.target_net_profit or ctx.extras.target_revenue or 0
+        peer_pe = ctx.extras.peer_pe_multiples
+        peer_ps = ctx.extras.peer_ps_multiples
 
         pe_val = comparable_valuation(target_metric, peer_pe, "PE") if peer_pe else {}
         ps_val = comparable_valuation(target_metric, peer_ps, "PS") if peer_ps else {}
