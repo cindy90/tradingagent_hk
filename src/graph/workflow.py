@@ -321,15 +321,17 @@ _AGENT_REGISTRY: dict[str, tuple[int, bool, bool]] = {
     "comparable": (4, True, True),
     "tech_trend": (5, True, False),
     "sentiment": (6, False, True),
-    "debate_manager": (7, False, False),
-    "risk": (8, False, False),
-    "decision": (9, False, False),
+    "fact_check": (7, False, False),  # 新增 #12 数字核对
+    "debate_manager": (8, False, False),
+    "risk": (9, False, False),
+    "decision": (10, False, False),
 }
 
 # 用户输入步骤名的别名（短形式 → 标准名）
 _STEP_ALIASES = {
     "prospectus": "prospectus_analyst",
     "debate": "debate_manager",
+    "factcheck": "fact_check",
     "all": None,  # 特殊值
 }
 
@@ -524,6 +526,7 @@ def rerun_steps(
     def _instantiate(name: str) -> BaseAgent:
         from src.agents.bear import BearResearcher  # noqa: F401
         from src.agents.bull import BullResearcher  # noqa: F401
+        from src.agents.fact_check import FactCheckerAgent
         klass_map = {
             "prospectus_analyst": ProspectusAnalystAgent,
             "industry": IndustryAgent,
@@ -531,14 +534,15 @@ def rerun_steps(
             "comparable": ComparableAgent,
             "tech_trend": TechTrendAgent,
             "sentiment": SentimentAgent,
+            "fact_check": FactCheckerAgent,
             "risk": RiskAgent,
             "decision": DecisionAgent,
         }
         if name == "debate_manager":
             return DebateOrchestrator(llm, max_rounds=rounds_for_debate)
         klass = klass_map[name]
-        if name == "decision":
-            return klass(llm)
+        if name in ("decision", "fact_check"):
+            return klass(llm)  # FactCheckerAgent / DecisionAgent 不接 summarizer
         return klass(llm, summarizer)
 
     # 6. 跑各步骤
@@ -661,6 +665,7 @@ class CornerstoneWorkflow:
         s = get_settings()
         max_rounds = debate_max_rounds if debate_max_rounds is not None else s.debate_max_rounds
 
+        from src.agents.fact_check import FactCheckerAgent
         self.steps: list[BaseAgent] = [
             ProspectusAnalystAgent(self.llm, self.summarizer),
             IndustryAgent(self.llm, self.summarizer),
@@ -668,6 +673,7 @@ class CornerstoneWorkflow:
             ComparableAgent(self.llm, self.summarizer),
             TechTrendAgent(self.llm, self.summarizer),
             SentimentAgent(self.llm, self.summarizer),
+            FactCheckerAgent(self.llm),  # ⭐ 新增: 跨 Agent 数字交叉核对
             DebateOrchestrator(self.llm, max_rounds=max_rounds),
             RiskAgent(self.llm, self.summarizer),
             DecisionAgent(self.llm),
@@ -769,6 +775,8 @@ class CornerstoneWorkflow:
         peer_confirm_callback: Any = None,
         recent_ipos: list[str] | None = None,
         ifind_target: str | None = None,
+        roadshow_signals: dict | None = None,
+        competing_ipo_tickers: list[str] | None = None,
     ) -> AgentContext:
         # 1. 基础 prefetch (不依赖 peers)
         prefetched = self._prefetch_ths(ticker, industry)
@@ -799,6 +807,8 @@ class CornerstoneWorkflow:
             peers=list(peers) if peers else None,
             recent_ipos=list(recent_ipos) if recent_ipos else None,
             ifind_target=ifind_target,
+            roadshow_signals=dict(roadshow_signals) if roadshow_signals else None,
+            competing_ipo_tickers=list(competing_ipo_tickers) if competing_ipo_tickers else None,
         )
 
         # 4. 用确认后的 peers + recent_ipos 拉 SDK 数据, setattr 到 ctx.extras
@@ -822,6 +832,32 @@ class CornerstoneWorkflow:
                 ctx.extras.target_revenue = float(tv["revenue"])
             if tv.get("net_profit"):
                 ctx.extras.target_net_profit = float(tv["net_profit"])
+
+        # 路演手输信号 (#11) → ctx.extras.roadshow_signals
+        if roadshow_signals:
+            ctx.extras.roadshow_signals = dict(roadshow_signals)
+
+        # 同期竞品 IPO (#14) → 拉每家的 IPO 信息存到 competing_ipos
+        if competing_ipo_tickers:
+            try:
+                from src.data.ifind_sdk import get_peer_ipo_summary
+                competing_list = []
+                for t in competing_ipo_tickers:
+                    info = get_peer_ipo_summary(t) or {}
+                    if info:
+                        competing_list.append({
+                            "ticker": t,
+                            "thscode": info.get("thscode"),
+                            "name": info.get("name"),
+                            "expected_listing_date": info.get("ipo_date") or "未确定",
+                            "expected_marketcap_hkd_b": None,  # 招股阶段未确定
+                            "ipo_price": info.get("ipo_price"),
+                            "overlap_note": "同期同行业, 关注资金分流",
+                        })
+                ctx.extras.competing_ipos = competing_list
+                logger.info(f"[Prefetch] competing_ipos: {len(competing_list)} 家")
+            except Exception as e:
+                logger.warning(f"[Prefetch] competing_ipos 失败: {e}")
 
         # 闭环关键 (Phase C): 检索历史相似案例，注入到 cached_blocks
         if use_case_rag:

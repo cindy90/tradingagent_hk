@@ -36,6 +36,15 @@ class WorkflowExtras:
     # 港股三大指数（HSI / HSCEI / HSTECH 实时点位 + PE）, 来自 iFinD
     market_indices: list = field(default_factory=list)
 
+    # 路演阶段手工录入的信号（CLI --dark-pool-price / --oversubscribe-x / --press-coverage 等）
+    # iFinD 不一定能拿到, 用户从富途/老虎/媒体补充
+    roadshow_signals: dict = field(default_factory=dict)
+    # 例如: {"dark_pool_price": 22.5, "oversubscribe_retail_x": 80, "oversubscribe_intl_x": 12,
+    #        "press_coverage_score": 4, "press_coverage_notes": "财新/华尔街见闻深度报道 3 篇"}
+
+    # 同期 / 未来 60 天同行业其它 IPO（用于评估资金分流效应）
+    competing_ipos: list = field(default_factory=list)
+
     # 目标公司本身的 iFinD 估值/财务（IPO 询价阶段也常已建档）
     target_valuation: dict | None = None
 

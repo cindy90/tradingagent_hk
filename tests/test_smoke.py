@@ -1011,11 +1011,14 @@ def test_normalize_step_names_handles_aliases() -> None:
     # 短名映射到标准名
     assert "prospectus_analyst" in normalize_step_names("prospectus")
     assert "debate_manager" in normalize_step_names("debate")
-    # 'all' 返回全部 9 步按序号排
+    # 'all' 返回全部 10 步按序号排（v2 加了 fact_check）
     all_steps = normalize_step_names("all")
     assert all_steps[0] == "prospectus_analyst"
     assert all_steps[-1] == "decision"
-    assert len(all_steps) == 9
+    assert len(all_steps) == 10
+    assert "fact_check" in all_steps
+    # 测试 fact_check 别名
+    assert "fact_check" in normalize_step_names("factcheck")
     # 多步去重 + 按序号排序
     out = normalize_step_names("decision,prospectus,risk")
     assert out == ["prospectus_analyst", "risk", "decision"]
@@ -1183,3 +1186,237 @@ def test_macro_uses_market_indices_from_extras_first(monkeypatch) -> None:
     assert "9.8" in md
     # 空数据
     assert "未返回指数数据" in _render_indices_md([])
+
+
+# ============================================================================
+# 专业级 v2 升级测试
+# ============================================================================
+
+def test_decision_schema_v2_supports_sensitivity_table() -> None:
+    """新 schema 必须能解析三档敏感性 + 对冲 + kill switches."""
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "审慎参与",
+        "confidence": "中",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {
+            "low": 50.0, "mid": 80.0, "high": 110.0,
+            "anchor_method": "PEG", "anchor_logic": "对标 peer PEG 1.4x",
+        },
+        "ipo_pricing_view": "合理",
+        "key_supports": ["技术领先"],
+        "key_risks": ["客户集中度高"],
+        "deal_conditions": [],
+        "monitoring_kpis": ["毛利率"],
+        "sensitivity_table": [
+            {"name": "悲观", "triggers": ["H1 毛利<30%"], "valuation_hkd_b": 45.0,
+             "probability": 0.30, "expected_return_pct": -44.0},
+            {"name": "基准", "triggers": ["财务符合预期"], "valuation_hkd_b": 80.0,
+             "probability": 0.50, "expected_return_pct": 0.0},
+            {"name": "乐观", "triggers": ["第二曲线兑现"], "valuation_hkd_b": 130.0,
+             "probability": 0.20, "expected_return_pct": 62.5},
+        ],
+        "hedging_strategy": {
+            "instrument": "恒生科技 ETF PUT",
+            "target_coverage_pct": 0.30,
+            "rationale": "锁定期内对冲行业系统性风险",
+        },
+        "exit_plan": {
+            "horizon": "解禁日 D+0",
+            "method": "VWAP",
+            "pace": "分 5 个交易日",
+            "trigger_conditions": ["解禁前股价跌破招股价 30%"],
+        },
+        "kill_switches": [
+            {"trigger": "创始人或 CTO 任一 30 天内离职", "action": "立刻减持 100%", "severity": "高"},
+            {"trigger": "Q1 经营现金流连续两季为负", "action": "启动 PUT 对冲", "severity": "中"},
+        ],
+        "monitoring_kpis_detailed": [
+            {"name": "毛利率", "threshold": "< 30%", "frequency": "季报",
+             "action_if_breach": "触发风险评估"},
+        ],
+    }
+    result, err = validate_decision(parsed)
+    assert result is not None
+    assert err == ""
+    assert len(result.sensitivity_table) == 3
+    # 概率之和约 1
+    total_p = sum(s.probability for s in result.sensitivity_table)
+    assert 0.95 < total_p < 1.05
+    assert result.hedging_strategy is not None
+    assert result.hedging_strategy.target_coverage_pct == 0.30
+    assert len(result.kill_switches) == 2
+    assert result.kill_switches[0].severity == "高"
+    assert result.exit_plan.method == "VWAP"
+    assert result.monitoring_kpis_detailed[0].threshold == "< 30%"
+
+
+def test_decision_schema_v2_backward_compat() -> None:
+    """旧 schema (没有 v2 新字段) 仍能 validate."""
+    from src.agents.decision import validate_decision
+
+    parsed_old = {
+        "recommendation": "认购",
+        "confidence": "中",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {
+            "mid": 80.0, "anchor_method": "PE", "anchor_logic": "x",
+        },
+        "ipo_pricing_view": "合理",
+        "key_supports": ["a"],
+        "key_risks": ["b"],
+    }
+    result, err = validate_decision(parsed_old)
+    assert result is not None
+    # 新字段默认空
+    assert result.sensitivity_table == []
+    assert result.hedging_strategy is None
+    assert result.kill_switches == []
+
+
+def test_risk_score_card_supports_detailed_risks() -> None:
+    from src.feedback.models import RiskScoreCard, RiskItem
+
+    card = RiskScoreCard(
+        summary="整体风险可控",
+        overall_score=3.5,
+        confidence="中",
+        evidence_pages=[],
+        overall_risk_level=3.5,
+        risk_dimensions={"财务造假": 4.0, "估值高估": 2.5},
+        detailed_risks=[
+            RiskItem(
+                dimension="客户集中",
+                score=2.5,
+                probability="中",
+                impact="大",
+                early_warning=["Top1 客户营收占比 > 35%"],
+            ),
+        ],
+        veto_conditions=["招股价 PS > 35x"],
+    )
+    assert len(card.detailed_risks) == 1
+    assert card.detailed_risks[0].probability == "中"
+    assert card.detailed_risks[0].early_warning == ["Top1 客户营收占比 > 35%"]
+
+
+def test_comparable_score_card_supports_peg_and_sotp() -> None:
+    from src.feedback.models import ComparableScoreCard
+
+    card = ComparableScoreCard(
+        summary="估值偏高",
+        overall_score=2.5,
+        confidence="中",
+        valuation_mid_hkd_b=80.0,
+        median_pe=70.0,
+        median_ps=22.0,
+        median_peg=1.4,
+        valuation_method="PEG",
+        implied_revenue_cagr_at_ipo=50.0,
+        sotp_breakdown={"硬件本体": 40.0, "协作机器人": 25.0, "具身智能": 15.0},
+    )
+    assert card.median_peg == 1.4
+    assert card.implied_revenue_cagr_at_ipo == 50.0
+    assert sum(card.sotp_breakdown.values()) == 80.0
+
+
+def test_fact_checker_agent_runs_with_mock_provider() -> None:
+    """FactCheckerAgent 必须能跑过 mock provider 的端到端流程."""
+    from pathlib import Path
+    import tempfile
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.agents.fact_check import FactCheckerAgent
+    from src.llm import LLMClient
+    from src.llm.client import LLMResponse
+
+    class _Mock:
+        def complete(self, *, model, system, messages, max_tokens, temperature, cached_system_blocks):
+            return LLMResponse(
+                text="## 一、数字抽取表\n...\n## 二、不一致警告\n经核对未发现重大数字矛盾",
+                input_tokens=100, output_tokens=50, model=model,
+            )
+
+    llm = LLMClient(provider=_Mock(), provider_name="mock")
+    agent = FactCheckerAgent(llm)
+    with tempfile.TemporaryDirectory() as d:
+        ctx = AgentContext(
+            project_id="t", ticker="X", company_name="测试", industry="x",
+            reports_dir=Path(d), rag=None, extras=WorkflowExtras(),
+        )
+        ctx.briefs["prospectus_analyst"] = "营收 4.2 亿"
+        ctx.briefs["comparable"] = "target revenue 4.5 亿"
+        report = agent.run(ctx)
+        assert agent.fatal is False  # 非致命
+        assert "fact_check" in ctx.briefs
+        assert "数字抽取" in report.full_report or "不一致" in report.full_report
+
+
+def test_workflow_extras_supports_v2_fields() -> None:
+    """新增 roadshow_signals / competing_ipos / market_indices 等字段."""
+    from src.agents.extras import WorkflowExtras
+
+    ex = WorkflowExtras()
+    ex.roadshow_signals = {"dark_pool_price": 22.5, "oversubscribe_retail_x": 80}
+    ex.competing_ipos = [{"ticker": "01234", "name": "竞品 A"}]
+    ex.market_indices = [{"index": "HSI", "latest_close": 23000}]
+    ex.peer_announcements = {"02432": [{"date": "2026-04-01", "title": "回购"}]}
+
+    assert ex.roadshow_signals["dark_pool_price"] == 22.5
+    assert ex.competing_ipos[0]["ticker"] == "01234"
+    assert ex.market_indices[0]["latest_close"] == 23000
+    assert "02432" in ex.peer_announcements
+
+
+def test_final_memo_writer_renders_sensitivity(tmp_path) -> None:
+    """FINAL_MEMO writer 渲染敏感性表 / 对冲策略 / kill switches."""
+    from datetime import datetime
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.reports.writer import write_final_summary
+
+    extras = WorkflowExtras()
+    extras.decision_json = {
+        "recommendation": "审慎参与",
+        "confidence": "中",
+        "valuation_range_hkd_billion": {"low": 50, "mid": 80, "high": 110, "anchor_method": "PEG"},
+        "ipo_pricing_view": "合理",
+        "suggested_amount_usd_million": [10, 20],
+        "key_supports": ["技术领先", "海外加速"],
+        "key_risks": ["客户集中度高"],
+        "deal_conditions": ["招股价 PS ≤ 30x"],
+        "sensitivity_table": [
+            {"name": "悲观", "triggers": ["毛利<30%"], "valuation_hkd_b": 45, "probability": 0.3, "expected_return_pct": -44.0},
+            {"name": "基准", "triggers": ["持平"], "valuation_hkd_b": 80, "probability": 0.5, "expected_return_pct": 0.0},
+            {"name": "乐观", "triggers": ["二曲线"], "valuation_hkd_b": 130, "probability": 0.2, "expected_return_pct": 62.5},
+        ],
+        "hedging_strategy": {
+            "instrument": "ETF PUT", "target_coverage_pct": 0.3, "rationale": "对冲系统性风险",
+        },
+        "exit_plan": {"horizon": "D+0", "method": "VWAP", "pace": "5 日", "trigger_conditions": []},
+        "kill_switches": [
+            {"trigger": "CTO 离职", "action": "减持 100%", "severity": "高"},
+        ],
+        "monitoring_kpis_detailed": [
+            {"name": "毛利率", "threshold": "<30%", "frequency": "季报", "action_if_breach": "评估"},
+        ],
+    }
+    ctx = AgentContext(
+        project_id="memo_test", ticker="X", company_name="测试", industry="x",
+        reports_dir=tmp_path, rag=None, extras=extras,
+    )
+    out = write_final_summary(ctx)
+    text = out.read_text(encoding="utf-8")
+    # 校验关键章节都渲染了
+    assert "Executive Summary" in text
+    assert "敏感性分析" in text
+    assert "对冲策略" in text
+    assert "Kill Switches" in text
+    # 渲染了具体内容
+    assert "悲观" in text and "乐观" in text
+    assert "ETF PUT" in text
+    assert "CTO 离职" in text
+    assert "毛利率" in text
+    # 概率被乘了 100
+    assert "30%" in text or "30.0%" in text

@@ -71,6 +71,31 @@ def analyze(
         "不传时用 --ticker；但招股期间港股代码会被已上市公司复用（如 2670.HK 实际是云迹），"
         "代码内置公司名校验, 不匹配会自动跳过 target 数据。",
     ),
+    # 路演信号（手输, iFinD 不一定能拿到）
+    dark_pool_price: float | None = typer.Option(
+        None, "--dark-pool-price",
+        help="暗盘价（HKD），从富途/老虎手抄。sentiment 用",
+    ),
+    ipo_price_low: float | None = typer.Option(
+        None, "--ipo-price-low",
+        help="招股价区间下限（HKD），用于算暗盘溢价",
+    ),
+    oversubscribe_retail: float | None = typer.Option(
+        None, "--oversubscribe-retail",
+        help="散户超额认购倍数（如 80 表示 80 倍）",
+    ),
+    oversubscribe_intl: float | None = typer.Option(
+        None, "--oversubscribe-intl",
+        help="国际配售超额认购倍数",
+    ),
+    press_coverage: int | None = typer.Option(
+        None, "--press-coverage", min=1, max=5,
+        help="媒体覆盖热度 1-5 分（5=深度报道密集）",
+    ),
+    competing_ipos: str | None = typer.Option(
+        None, "--competing-ipos",
+        help="未来 60 天同行业 IPO 队列代码列表（逗号分隔），用于资金分流分析",
+    ),
 ) -> None:
     """对单个 IPO 项目跑完整深度分析。"""
     _setup_logging()
@@ -129,11 +154,30 @@ def analyze(
 
     callback = None if (peer_list or no_confirm_peers) else _interactive_peer_confirm
 
+    # 路演手输信号 → ctx.extras.roadshow_signals
+    roadshow_signals: dict = {}
+    if dark_pool_price is not None:
+        roadshow_signals["dark_pool_price"] = dark_pool_price
+    if ipo_price_low is not None:
+        roadshow_signals["ipo_price_low"] = ipo_price_low
+    if oversubscribe_retail is not None:
+        roadshow_signals["oversubscribe_retail_x"] = oversubscribe_retail
+    if oversubscribe_intl is not None:
+        roadshow_signals["oversubscribe_intl_x"] = oversubscribe_intl
+    if press_coverage is not None:
+        roadshow_signals["press_coverage_score"] = press_coverage
+
+    competing_ipos_list: list[str] | None = None
+    if competing_ipos:
+        competing_ipos_list = [p.strip() for p in competing_ipos.split(",") if p.strip()]
+
     workflow = CornerstoneWorkflow(debate_max_rounds=debate_rounds)
     ctx = workflow.run(
         ticker=ticker,
         company_name=name,
         industry=industry,
+        roadshow_signals=roadshow_signals if roadshow_signals else None,
+        competing_ipo_tickers=competing_ipos_list,
         prospectus_pdf=pdf_arg,
         peers=peer_list,
         peer_confirm_callback=callback,

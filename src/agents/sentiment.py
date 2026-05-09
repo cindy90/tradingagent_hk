@@ -11,8 +11,10 @@ SYSTEM = """你是港股二级市场情绪分析师。基于近期市场表现�
 ## 二、可比已上市公司股价表现（近 30/90 天）
 ## 三、近期同行业 IPO 暗盘/首日表现
 ## 四、可比公司近期事件（减持/业绩/回购等会影响赛道情绪的公告）⭐
-## 五、市场关注度迹象（媒体覆盖、分析师跟踪）
-## 六、对本次基石认购的情绪面判断（顺风/逆风）
+## 五、本项目路演渠道信号（暗盘价 / 超额认购倍数 / 媒体覆盖密度）⭐
+## 六、同期 / 未来 60 天同行业 IPO 队列（资金分流分析）⭐
+## 七、市场关注度迹象（媒体覆盖、分析师跟踪）
+## 八、对本次基石认购的情绪面判断（顺风/逆风）
 
 输出 1000-1500 字。如缺乏数据，明确指出数据缺口。
 
@@ -131,6 +133,45 @@ def _render_peer_announcements(anns: dict[str, list[dict]]) -> str:
     return "\n".join(lines)
 
 
+def _render_roadshow_signals(signals: dict) -> str:
+    """渲染用户手输的路演信号（暗盘价 / 超额倍数 / 媒体）。"""
+    if not signals:
+        return "（未提供路演信号；CLI 可加 --dark-pool-price / --oversubscribe-retail / --press-coverage）"
+    lines = []
+    if signals.get("dark_pool_price") is not None:
+        ipo_low = signals.get("ipo_price_low")
+        dp = signals["dark_pool_price"]
+        if ipo_low and ipo_low > 0:
+            ret = (dp / ipo_low - 1) * 100
+            lines.append(f"- **暗盘价**: {dp} HKD (vs 招股价下限 {ipo_low}, {ret:+.1f}%)")
+        else:
+            lines.append(f"- **暗盘价**: {dp} HKD (招股价未提供, 无法算溢价)")
+    if signals.get("oversubscribe_retail_x") is not None:
+        lines.append(f"- **散户超额认购**: {signals['oversubscribe_retail_x']}x")
+    if signals.get("oversubscribe_intl_x") is not None:
+        lines.append(f"- **国际配售超额**: {signals['oversubscribe_intl_x']}x")
+    if signals.get("press_coverage_score") is not None:
+        lines.append(f"- **媒体覆盖热度** (1-5): {signals['press_coverage_score']}")
+    if signals.get("press_coverage_notes"):
+        lines.append(f"- **媒体覆盖说明**: {signals['press_coverage_notes']}")
+    return "\n".join(lines) if lines else "（路演信号字典为空）"
+
+
+def _render_competing_ipos(rows: list[dict]) -> str:
+    """渲染同期 / 未来 60 天同行业其它 IPO."""
+    if not rows:
+        return "（未提供同期 / 未来 60 天同行业 IPO 数据）"
+    lines = ["| 代码 | 公司 | 拟上市日 | 估值规模 | 资金分流影响 |",
+             "|---|---|---|---|---|"]
+    for r in rows:
+        lines.append(
+            f"| {r.get('thscode') or r.get('ticker','')} | {r.get('name','-')} | "
+            f"{r.get('expected_listing_date','-')} | {r.get('expected_marketcap_hkd_b','-')} 亿 | "
+            f"{r.get('overlap_note','-')} |"
+        )
+    return "\n".join(lines)
+
+
 def _render_recent_ipos(rows: list[dict]) -> str:
     """近期同行业 IPO 表: 招股价 / 首日开盘价 / 首日开盘涨跌。"""
     if not rows:
@@ -163,12 +204,16 @@ class SentimentAgent(TemplateAgent):
         recent_ipos_md = _render_recent_ipos(ctx.extras.recent_hk_ipos)
         southbound_md = _render_southbound_md(ctx.extras.macro_indicators)
         peer_anns_md = _render_peer_announcements(ctx.extras.peer_announcements)
+        roadshow_md = _render_roadshow_signals(ctx.extras.roadshow_signals)
+        competing_md = _render_competing_ipos(ctx.extras.competing_ipos)
         return (
             f"# 项目\n{ctx.company_name} ({ctx.ticker})  行业: {ctx.industry}\n\n"
             f"# 可比公司 IPO 信息（来自 iFinD THS_BD）\n{peers_info_md}\n\n"
             f"# 可比公司近期行情（来自 iFinD THS_HQ，最新交易日数据）\n{peers_quotes_md}\n\n"
             f"# 可比公司近 180 天关键公告事件（来自 iFinD report_query）\n{peer_anns_md}\n\n"
             f"# 近期同行业 IPO 表现\n{recent_ipos_md}\n\n"
+            f"# 本项目路演信号（用户手输 / iFinD 拉不到）\n{roadshow_md}\n\n"
+            f"# 同期 / 未来 60 天同行业 IPO 队列（资金分流）\n{competing_md}\n\n"
             f"# 港股通南向资金（来自 iFinD EDB, 全市场口径）\n{southbound_md}\n\n"
             f"请输出情绪分析。第一节'板块近期情绪'必须引用上方南向资金数据"
             f"（如近 7 日净流入趋势 / 7 日均值 vs 最新一日对比 / 累计净流入变动）, 不要写'未提供'。"
