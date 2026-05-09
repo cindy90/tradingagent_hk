@@ -1049,3 +1049,137 @@ def test_load_run_metadata_missing_dir_returns_empty(tmp_path) -> None:
     from src.graph.workflow import load_run_metadata
 
     assert load_run_metadata(tmp_path / "nonexistent") == {}
+
+
+# ============================================================================
+# iFinD 全覆盖（指数/IPO returns/公告）测试
+# ============================================================================
+
+def test_tag_announcement_recognizes_keywords() -> None:
+    from src.data.ifind_sdk import tag_announcement
+
+    assert "减持" in tag_announcement("控股股东减持公告")
+    assert "减持" in tag_announcement("Disposal of Shares by Major Shareholder")
+    assert "业绩" in tag_announcement("盈利预警公告")
+    assert "业绩" in tag_announcement("Profit Warning")
+    assert "回购" in tag_announcement("股份回购公告")
+    assert "增发" in tag_announcement("配售公告")
+    # 多标签
+    tags = tag_announcement("拟回购及调整薪酬体系")
+    assert "回购" in tags
+    assert "调整" in tags
+    # 不命中
+    assert tag_announcement("董事会会议通告") == []
+
+
+def test_compute_post_ipo_returns_returns_error_without_listing_date(monkeypatch) -> None:
+    """未传 listing_date 且 iFinD 拉不到时应返错误结构。"""
+    import src.data.ifind_sdk as m
+
+    # mock get_peer_ipo_summary 返回空 ipo_date
+    monkeypatch.setattr(m, "get_peer_ipo_summary", lambda *a, **kw: {})
+    out = m.compute_post_ipo_returns("02670", 18.5)
+    assert "error" in out
+
+
+def test_compute_post_ipo_returns_handles_invalid_listing_date(monkeypatch) -> None:
+    import src.data.ifind_sdk as m
+
+    out = m.compute_post_ipo_returns("02670", 18.5, listing_date="not-a-date")
+    assert "error" in out
+
+
+def test_compute_post_ipo_returns_with_mocked_quotes(monkeypatch) -> None:
+    """给定模拟 K 线数据, 验证 returns / 破发 / 最大回撤计算正确。"""
+    import src.data.ifind_sdk as m
+
+    # 100 行: 价格 18.5 → 20 → 22 → ... → 17 (锁定期内有冲高有回撤)
+    # 简化: D1 收 19, D30 收 22, D90 收 25, D180 收 16
+    fake_rows: list[dict] = []
+    for i in range(200):
+        if i == 0:
+            close = 19.0
+            open_ = 19.5
+        elif i < 30:
+            close = 19.0 + i * 0.1  # 涨到 22 左右
+            open_ = close
+        elif i < 90:
+            close = 22.0 + (i - 30) * 0.05
+            open_ = close
+        else:
+            close = 25.0 - (i - 90) * 0.08  # 跌
+            open_ = close
+        fake_rows.append({"open": open_, "close": close, "amount": 100_000_000})
+
+    monkeypatch.setattr(m, "get_history_quotes", lambda *a, **kw: fake_rows)
+    monkeypatch.setattr(m, "get_peer_ipo_summary", lambda *a, **kw: {"ipo_date": "2026-01-01"})
+
+    out = m.compute_post_ipo_returns("02670", 18.5, listing_date="2026-01-01")
+    assert out.get("error") is None
+    assert out["d1_close"] == 19.0
+    assert out["d1_return"] == round(19.0 / 18.5 - 1, 4)
+    assert out["d1_open_return"] == round(19.5 / 18.5 - 1, 4)
+    assert out["was_broken_d1"] is False
+    # D180 = 索引 179: close = 25.0 - 89 * 0.08 = 17.88，仍未破发
+    # 但前面有冲高 25 → 后续回撤超过 25%，max_dd_in_d180 应为负
+    assert out["d180_close"] is not None
+    assert out["max_drawdown_in_d180_pct"] is not None
+    assert out["max_drawdown_in_d180_pct"] < 0  # 必有回撤
+    # 平均成交 = 100M / 1M = 100 百万
+    assert out["avg_daily_turnover_hkd_m_d180"] == 100.0
+
+
+def test_compute_post_ipo_returns_handles_zero_ipo_price(monkeypatch) -> None:
+    import src.data.ifind_sdk as m
+
+    monkeypatch.setattr(m, "get_history_quotes", lambda *a, **kw: [
+        {"open": 1.0, "close": 1.0, "amount": 100}
+    ])
+    out = m.compute_post_ipo_returns("X", 0.0, listing_date="2026-01-01")
+    # ipo_price=0 不应抛 ZeroDivisionError, 各 return 字段为 None
+    assert out["d1_return"] is None
+
+
+def test_get_index_summary_handles_no_data(monkeypatch) -> None:
+    import src.data.ifind_sdk as m
+
+    monkeypatch.setattr(m, "get_history_quotes", lambda *a, **kw: [])
+    monkeypatch.setattr(m, "get_basic_data", lambda *a, **kw: {})
+    out = m.get_index_summary("HSI")
+    assert out["index"] == "HSI"
+    assert out["thscode"] == "HSI.HI"
+    assert out["latest_close"] is None
+    assert out["pe_ttm"] is None
+
+
+def test_get_index_summary_picks_up_close_and_pe(monkeypatch) -> None:
+    import src.data.ifind_sdk as m
+
+    fake_rows = [{"close": 22000.0 + i * 10, "time": f"2026-01-{(i % 28) + 1:02d}"} for i in range(100)]
+    monkeypatch.setattr(m, "get_history_quotes", lambda *a, **kw: fake_rows)
+    monkeypatch.setattr(m, "get_basic_data", lambda *a, **kw: {"pe_ttm": 9.5, "pb_latest": 1.1})
+    out = m.get_index_summary("HSI")
+    assert out["latest_close"] == fake_rows[-1]["close"]
+    assert out["pe_ttm"] == 9.5
+    assert out["pb_latest"] == 1.1
+    assert out["change_30d"] is not None
+    assert out["change_90d"] is not None
+
+
+def test_macro_uses_market_indices_from_extras_first(monkeypatch) -> None:
+    """macro Agent 优先从 ctx.extras.market_indices 读, 而不是每次重新调 SDK."""
+    from src.agents.extras import WorkflowExtras
+    from src.agents.macro import _render_indices_md
+
+    # 直接测渲染函数: 给定 indices 列表 → 输出表格
+    indices = [
+        {"index": "HSI", "thscode": "HSI.HI", "latest_close": 23000,
+         "latest_date": "2026-05-09", "change_30d": 1.5, "change_90d": -2.1,
+         "pe_ttm": 9.8, "pb_latest": 1.05},
+    ]
+    md = _render_indices_md(indices)
+    assert "HSI" in md
+    assert "23000" in md
+    assert "9.8" in md
+    # 空数据
+    assert "未返回指数数据" in _render_indices_md([])

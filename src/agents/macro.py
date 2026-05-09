@@ -4,7 +4,6 @@ from typing import Any
 
 from src.agents._template import TemplateAgent
 from src.agents.base import AgentContext
-from src.data.akshare_client import get_hsi_index
 from src.feedback.models import MacroScoreCard
 from src.llm import ModelTier
 
@@ -16,6 +15,24 @@ def _to_float(v: Any) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _render_indices_md(rows: list[dict]) -> str:
+    """渲染港股指数表 (来自 iFinD)。"""
+    if not rows:
+        return "（iFinD 未返回指数数据；请检查 IFIND_USERNAME/PASSWORD 配置）"
+    lines = ["| 指数 | 最新点位 | 最新日期 | 30 日变动% | 90 日变动% | PE-TTM | PB |",
+             "|---|---|---|---|---|---|---|"]
+    for r in rows:
+        lines.append(
+            f"| {r.get('index')} ({r.get('thscode','-')}) | "
+            f"{r.get('latest_close','-')} | {r.get('latest_date','-')} | "
+            f"{r.get('change_30d') if r.get('change_30d') is not None else '-'} | "
+            f"{r.get('change_90d') if r.get('change_90d') is not None else '-'} | "
+            f"{r.get('pe_ttm') if r.get('pe_ttm') is not None else '-'} | "
+            f"{r.get('pb_latest') if r.get('pb_latest') is not None else '-'} |"
+        )
+    return "\n".join(lines)
 
 
 def _percentile_rank(series: list[dict], latest_value: float | None) -> tuple[float | None, float | None, float | None]:
@@ -64,7 +81,17 @@ class MacroAgent(TemplateAgent):
     score_card_class = MacroScoreCard
 
     def build_user_message(self, ctx: AgentContext) -> str:
-        hsi = get_hsi_index()
+        # 港股三大指数: 优先从 ctx.extras.market_indices (workflow 已 prefetch),
+        # 缺失时实时调一次 iFinD（兼容 rerun 场景）
+        indices = ctx.extras.market_indices
+        if not indices:
+            try:
+                from src.data.ifind_sdk import get_indices_summary
+                indices = get_indices_summary(["HSI", "HSCEI", "HSTECH"])
+            except Exception as e:
+                from loguru import logger as _lg
+                _lg.warning(f"get_indices_summary 失败: {e}")
+                indices = []
         macro = ctx.extras.macro_indicators
 
         # 把 EDB 时间序列压缩为"最新值 / 6 期前 / 12 期前 / 历史分位 / 趋势"
@@ -105,10 +132,12 @@ class MacroAgent(TemplateAgent):
 
         return (
             f"# 项目\n{ctx.company_name} ({ctx.ticker})  行业: {ctx.industry}\n\n"
-            f"# 当前恒生指数（akshare）\n{hsi}\n\n"
+            f"# 港股三大指数（来自 iFinD THS_HQ + THS_BD，最新交易日数据）\n"
+            f"{_render_indices_md(indices)}\n\n"
             f"# 宏观指标（同花顺 EDB, 含历史分位）\n{macro_block}\n\n"
             f"# 近期港股 IPO 首日破发统计\n{ipo_break_block}\n\n"
-            f"请输出宏观策略分析。"
+            f"请输出宏观策略分析。第三节'恒指估值'必须引用上方 HSI PE 数据 + 历史分位（若 EDB 有），"
+            f"第五节'板块偏好'引用三大指数 30/90 日变动对比。"
         )
 
     @staticmethod

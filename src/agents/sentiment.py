@@ -10,8 +10,9 @@ SYSTEM = """你是港股二级市场情绪分析师。基于近期市场表现�
 ## 一、所在板块近期情绪（涨跌、成交、北水流向）
 ## 二、可比已上市公司股价表现（近 30/90 天）
 ## 三、近期同行业 IPO 暗盘/首日表现
-## 四、市场关注度迹象（媒体覆盖、分析师跟踪）
-## 五、对本次基石认购的情绪面判断（顺风/逆风）
+## 四、可比公司近期事件（减持/业绩/回购等会影响赛道情绪的公告）⭐
+## 五、市场关注度迹象（媒体覆盖、分析师跟踪）
+## 六、对本次基石认购的情绪面判断（顺风/逆风）
 
 输出 1000-1500 字。如缺乏数据，明确指出数据缺口。
 
@@ -108,6 +109,28 @@ def _render_southbound_md(macro: dict) -> str:
     return "\n".join(parts)
 
 
+def _render_peer_announcements(anns: dict[str, list[dict]]) -> str:
+    """渲染 peer 近期公告事件（仅含命中关键标签的，全量太多没意义）。"""
+    if not anns:
+        return "（未提供 peer 公告数据；REST API 未配置或近期无公告）"
+    lines = ["| 代码 | 日期 | 标签 | 标题 |", "|---|---|---|---|"]
+    n_total = 0
+    for ticker, rows in anns.items():
+        for a in rows:
+            tags = a.get("tags") or []
+            if not tags:
+                continue  # 只展示命中关键事件的（减持/业绩/回购/增发/更名/调整）
+            n_total += 1
+            title = (a.get("title") or "")[:60]
+            date = a.get("date", "-")
+            lines.append(
+                f"| {ticker} | {date} | {','.join(tags)} | {title} |"
+            )
+    if n_total == 0:
+        return "（peer 近 180 天公告中无关键事件: 减持/业绩预警/回购/增发等）"
+    return "\n".join(lines)
+
+
 def _render_recent_ipos(rows: list[dict]) -> str:
     """近期同行业 IPO 表: 招股价 / 首日开盘价 / 首日开盘涨跌。"""
     if not rows:
@@ -139,10 +162,12 @@ class SentimentAgent(TemplateAgent):
         peers_info_md = _render_peers_info(ctx.extras.peers)
         recent_ipos_md = _render_recent_ipos(ctx.extras.recent_hk_ipos)
         southbound_md = _render_southbound_md(ctx.extras.macro_indicators)
+        peer_anns_md = _render_peer_announcements(ctx.extras.peer_announcements)
         return (
             f"# 项目\n{ctx.company_name} ({ctx.ticker})  行业: {ctx.industry}\n\n"
             f"# 可比公司 IPO 信息（来自 iFinD THS_BD）\n{peers_info_md}\n\n"
             f"# 可比公司近期行情（来自 iFinD THS_HQ，最新交易日数据）\n{peers_quotes_md}\n\n"
+            f"# 可比公司近 180 天关键公告事件（来自 iFinD report_query）\n{peer_anns_md}\n\n"
             f"# 近期同行业 IPO 表现\n{recent_ipos_md}\n\n"
             f"# 港股通南向资金（来自 iFinD EDB, 全市场口径）\n{southbound_md}\n\n"
             f"请输出情绪分析。第一节'板块近期情绪'必须引用上方南向资金数据"

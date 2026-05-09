@@ -30,6 +30,11 @@ class WorkflowExtras:
     # 二级市场情绪
     peer_recent_quotes: list = field(default_factory=list)
     recent_hk_ipos: list = field(default_factory=list)
+    # peer 近期公告事件（减持 / 业绩预警 / 回购等，影响 sentiment / risk）
+    peer_announcements: dict = field(default_factory=dict)  # {ticker: [{date, title, tags}]}
+
+    # 港股三大指数（HSI / HSCEI / HSTECH 实时点位 + PE）, 来自 iFinD
+    market_indices: list = field(default_factory=list)
 
     # 目标公司本身的 iFinD 估值/财务（IPO 询价阶段也常已建档）
     target_valuation: dict | None = None

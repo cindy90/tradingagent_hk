@@ -423,3 +423,271 @@ def get_peer_ipo_summary(ticker: str) -> dict[str, Any]:
         "first_day_open": first_day_open,
         "first_day_open_return": first_day_open_return,
     }
+
+
+# ============================================================================
+# 港股指数 / 投后股价 / 公告查询
+# ============================================================================
+
+# 常用港股指数 thscode (iFinD 格式: <code>.HI)
+HK_INDICES = {
+    "HSI": "HSI.HI",         # 恒生指数
+    "HSCEI": "HSCEI.HI",     # 恒生中国企业指数 (H 股)
+    "HSTECH": "HSTECH.HI",   # 恒生科技指数
+    "HSCI": "HSCI.HI",       # 恒生综合指数
+    "HSCCI": "HSCCI.HI",     # 恒生中国 25 指数
+    "HSML": "HSML.HI",       # 恒生医疗保健指数
+}
+
+
+def get_index_summary(index_code: str = "HSI") -> dict[str, Any]:
+    """港股指数实时点位 + 估值（替换 akshare 的 get_hsi_index）。
+
+    Args:
+        index_code: 'HSI' / 'HSCEI' / 'HSTECH' 等; 也接受完整 thscode 如 'HSI.HI'
+
+    Returns:
+        {index, thscode, latest_close, latest_date, change_30d, change_90d,
+         pe_ttm, pb_latest}; 任何字段拿不到都为 None。
+    """
+    code = index_code if "." in index_code else HK_INDICES.get(index_code.upper(), f"{index_code}.HI")
+
+    # 1. 近期 K 线 → 当前点位 + 30/90 日变动
+    from datetime import date, timedelta
+    edate = date.today().strftime("%Y-%m-%d")
+    sdate = (date.today() - timedelta(days=140)).strftime("%Y-%m-%d")
+    rows = get_history_quotes(code, "close", sdate, edate)
+    out: dict[str, Any] = {
+        "index": index_code, "thscode": code,
+        "latest_close": None, "latest_date": None,
+        "change_30d": None, "change_90d": None,
+        "pe_ttm": None, "pb_latest": None,
+    }
+    if rows:
+        latest = rows[-1]
+        out["latest_close"] = latest.get("close")
+        out["latest_date"] = latest.get("time")
+        if len(rows) >= 30:
+            p30 = rows[-30].get("close")
+            if out["latest_close"] and p30:
+                out["change_30d"] = round((out["latest_close"] / p30 - 1) * 100, 2)
+        if len(rows) >= 90:
+            p90 = rows[-90].get("close")
+            if out["latest_close"] and p90:
+                out["change_90d"] = round((out["latest_close"] / p90 - 1) * 100, 2)
+
+    # 2. 估值倍数（iFinD 部分指数有 pe_ttm / pb_latest 字段）
+    today_str = edate
+    fields = "pe_ttm;pb_latest"
+    params = f"{today_str},100;{today_str},100"
+    val = get_basic_data(code, fields, params)
+    out["pe_ttm"] = val.get("pe_ttm")
+    out["pb_latest"] = val.get("pb_latest")
+    return out
+
+
+def get_indices_summary(codes: list[str] | None = None) -> list[dict]:
+    """批量取多个港股指数。默认 HSI / HSCEI / HSTECH 三大指数。"""
+    if codes is None:
+        codes = ["HSI", "HSCEI", "HSTECH"]
+    return [get_index_summary(c) for c in codes]
+
+
+def compute_post_ipo_returns(
+    ticker: str,
+    ipo_price: float,
+    listing_date: str | None = None,
+) -> dict[str, Any]:
+    """根据 ticker + 招股价 + 上市日期，自动算上市后 d1/d30/d90/d180/d365 收益率。
+
+    Args:
+        ticker: 港股代码（5 位）。已上市后 ticker 通常已正式（不是 H 副牌）
+        ipo_price: 招股价 HKD
+        listing_date: 上市日期 'YYYY-MM-DD'; None 时尝试从 iFinD 拉
+
+    Returns:
+        {
+          listing_date, d1_close, d30_close, d90_close, d180_close, d365_close,
+          d1_return, d30_return, d90_return, d180_return, d365_return,  (相对招股价)
+          d1_open_return,  (首日开盘 vs 招股价)
+          was_broken_d1, was_broken_d180,
+          max_drawdown_in_d180_pct, min_price_in_d180,
+          avg_daily_turnover_hkd_m_d180,
+        }
+        任何字段缺失为 None；listing_date 拉不到则只返回基础结构。
+    """
+    code = to_ths_hk_code(ticker)
+
+    # 上市日期：优先用户给定 / 否则查 iFinD
+    if listing_date is None:
+        ipo_summary = get_peer_ipo_summary(ticker)
+        listing_date = ipo_summary.get("ipo_date")
+    if not listing_date:
+        return {"error": f"无法确定 {ticker} 上市日期，需显式传 listing_date"}
+
+    from datetime import datetime, timedelta
+    try:
+        ld = datetime.strptime(listing_date[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return {"error": f"上市日期格式异常: {listing_date}"}
+
+    # 拉上市日 ~ 上市日+400 日的日 K + 成交额
+    sdate = ld.strftime("%Y-%m-%d")
+    edate = min(
+        (ld + timedelta(days=400)).strftime("%Y-%m-%d"),
+        datetime.today().strftime("%Y-%m-%d"),
+    )
+    rows = get_history_quotes(code, "open,close,amount", sdate, edate)
+
+    out: dict[str, Any] = {
+        "ticker": ticker, "thscode": code, "listing_date": listing_date,
+        "ipo_price": ipo_price,
+        "d1_close": None, "d1_return": None, "d1_open_return": None,
+        "d30_close": None, "d30_return": None,
+        "d90_close": None, "d90_return": None,
+        "d180_close": None, "d180_return": None,
+        "d365_close": None, "d365_return": None,
+        "was_broken_d1": None, "was_broken_d180": None,
+        "max_drawdown_in_d180_pct": None,
+        "min_price_in_d180": None,
+        "avg_daily_turnover_hkd_m_d180": None,
+    }
+    if not rows:
+        return out
+
+    # rows 升序（_parse_edb_payload 已 sort，get_history_quotes 默认升序）
+    def _close_at(idx: int) -> float | None:
+        if 0 <= idx < len(rows):
+            v = rows[idx].get("close")
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _ret(close: float | None) -> float | None:
+        if close is None or ipo_price <= 0:
+            return None
+        return round(close / ipo_price - 1, 4)
+
+    # rows[0] 是首日; 用 1, 30, 90, 180, 365 个交易日（不是日历日）
+    out["d1_close"] = _close_at(0)
+    out["d30_close"] = _close_at(min(29, len(rows) - 1))
+    out["d90_close"] = _close_at(min(89, len(rows) - 1))
+    out["d180_close"] = _close_at(min(179, len(rows) - 1))
+    out["d365_close"] = _close_at(min(244, len(rows) - 1))  # 港股年交易日 ~245
+    out["d1_return"] = _ret(out["d1_close"])
+    out["d30_return"] = _ret(out["d30_close"])
+    out["d90_return"] = _ret(out["d90_close"])
+    out["d180_return"] = _ret(out["d180_close"])
+    out["d365_return"] = _ret(out["d365_close"])
+
+    # 首日开盘 vs 招股价
+    first_open = rows[0].get("open")
+    try:
+        first_open_f = float(first_open) if first_open is not None else None
+    except (TypeError, ValueError):
+        first_open_f = None
+    if first_open_f is not None and ipo_price > 0:
+        out["d1_open_return"] = round(first_open_f / ipo_price - 1, 4)
+
+    # 是否破发
+    if out["d1_close"] is not None:
+        out["was_broken_d1"] = out["d1_close"] < ipo_price
+    if out["d180_close"] is not None:
+        out["was_broken_d180"] = out["d180_close"] < ipo_price
+
+    # 锁定期内最大回撤、最低价
+    closes_180 = [_close_at(i) for i in range(min(180, len(rows)))]
+    closes_180 = [c for c in closes_180 if c is not None]
+    if closes_180:
+        peak = ipo_price
+        max_dd = 0.0
+        for c in closes_180:
+            if c > peak:
+                peak = c
+            dd = (c - peak) / peak if peak > 0 else 0
+            if dd < max_dd:
+                max_dd = dd
+        out["max_drawdown_in_d180_pct"] = round(max_dd * 100, 2)
+        out["min_price_in_d180"] = round(min(closes_180), 4)
+
+    # 180 日均成交额（港币百万）—— iFinD amount 单位通常是港元，转成 M
+    amounts = []
+    for i in range(min(180, len(rows))):
+        a = rows[i].get("amount")
+        try:
+            if a is not None:
+                amounts.append(float(a))
+        except (TypeError, ValueError):
+            pass
+    if amounts:
+        out["avg_daily_turnover_hkd_m_d180"] = round(sum(amounts) / len(amounts) / 1_000_000, 2)
+
+    return out
+
+
+def get_recent_announcements(
+    ticker: str,
+    days: int = 180,
+    limit: int = 20,
+) -> list[dict]:
+    """拉某 ticker 近 N 天的临时公告标题列表（依托 ths_client.report_query）。
+
+    用途: peers 近期减持/业绩公告 → sentiment/risk 看 peer 是否有"实际控制人减持"
+    "盈利预警"等会影响赛道情绪的事件。
+
+    Args:
+        ticker: 港股 5/4 位代码
+        days: 回看天数（默认 180）
+        limit: 返回条数上限
+
+    Returns: [{date, title, pdfURL, reportType}, ...]
+    """
+    from datetime import date, timedelta
+
+    from src.data.ths_client import THSClient
+
+    client = THSClient()
+    if not client.configured:
+        logger.debug("THS REST 未配置, 跳过 announcements 查询")
+        return []
+
+    code = to_ths_hk_code(ticker)
+    edate = date.today().strftime("%Y-%m-%d")
+    sdate = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    rows = client.query_reports(
+        codes=code,
+        function_params={"startDate": sdate, "endDate": edate},
+    )
+    out = []
+    for r in rows[:limit]:
+        out.append({
+            "date": r.get("declareDate") or r.get("DECLAREDATE") or r.get("publishTime"),
+            "title": r.get("title") or r.get("TITLE", ""),
+            "pdfURL": r.get("pdfURL") or r.get("PDFURL", ""),
+            "reportType": r.get("reportType") or r.get("REPORTTYPE", ""),
+        })
+    return out
+
+
+# 用关键词标注公告类型（便于 sentiment / risk 直接看到是否有"减持/业绩预警"）
+_ANNOUNCEMENT_TAGS = {
+    "减持": ["减持", "出售股份", "出售股票", "Disposal of Shares"],
+    "业绩": ["业绩", "盈利预警", "Profit Warning", "中期业绩", "年度业绩"],
+    "回购": ["回购", "Buy-back", "Share Repurchase"],
+    "增发": ["配售", "增发", "Placing", "Top-up"],
+    "更名": ["更改公司名称", "Change of Company Name"],
+    "调整": ["调整", "重组", "Reorganization"],
+}
+
+
+def tag_announcement(title: str) -> list[str]:
+    """从公告标题里抽出标签（减持/业绩/回购等）。"""
+    title_low = title.lower()
+    out = []
+    for tag, kws in _ANNOUNCEMENT_TAGS.items():
+        if any(kw.lower() in title_low for kw in kws):
+            out.append(tag)
+    return out

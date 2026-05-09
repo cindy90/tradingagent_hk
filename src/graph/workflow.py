@@ -238,11 +238,51 @@ def _prefetch_ifind_sdk(
             logger.warning(f"[Prefetch SDK] target {target_ticker} 估值/财务失败: {e}")
             target_data = None
 
+    # peer 近期公告（最近 180 天）— 减持 / 业绩预警 / 回购等
+    # 用于 sentiment / risk: 看 peer 是否有"实际控制人减持""盈利预警"等
+    # 会影响赛道情绪的事件
+    peer_announcements: dict[str, list[dict]] = {}
+    try:
+        from src.data.ifind_sdk import get_recent_announcements, tag_announcement
+        for ticker in peers:
+            try:
+                anns = get_recent_announcements(ticker, days=180, limit=15)
+                for a in anns:
+                    a["tags"] = tag_announcement(a.get("title", ""))
+                peer_announcements[ticker] = anns
+                if anns:
+                    n_tagged = sum(1 for a in anns if a["tags"])
+                    logger.info(
+                        f"[Prefetch] {ticker} 近 180 天公告 {len(anns)} 条 "
+                        f"({n_tagged} 条命中关键事件)"
+                    )
+            except Exception as e:
+                logger.warning(f"[Prefetch] {ticker} 公告查询失败: {e}")
+    except ImportError:
+        pass
+
+    # 港股三大指数（HSI / HSCEI / HSTECH 实时 + PE）→ macro Agent 用
+    market_indices: list[dict] = []
+    try:
+        from src.data.ifind_sdk import get_indices_summary
+        market_indices = get_indices_summary(["HSI", "HSCEI", "HSTECH"])
+        logger.info(
+            f"[Prefetch] 港股指数: "
+            + " | ".join(
+                f"{r.get('index')}={r.get('latest_close')}"
+                for r in market_indices
+            )
+        )
+    except Exception as e:
+        logger.warning(f"[Prefetch] 港股指数查询失败: {e}")
+
     return {
         "peers": peers_info,
         "peer_recent_quotes": quotes,
         "recent_hk_ipos": recent_ipos_info,
         "target_valuation": target_data,
+        "peer_announcements": peer_announcements,
+        "market_indices": market_indices,
     }
 
 
@@ -431,6 +471,8 @@ def rerun_steps(
                 wf_extras.peer_recent_quotes = sdk_data["peer_recent_quotes"]
                 wf_extras.recent_hk_ipos = sdk_data["recent_hk_ipos"]
                 wf_extras.target_valuation = sdk_data.get("target_valuation")
+                wf_extras.peer_announcements = sdk_data.get("peer_announcements", {})
+                wf_extras.market_indices = sdk_data.get("market_indices", [])
                 tv = sdk_data.get("target_valuation") or {}
                 if tv.get("revenue"):
                     wf_extras.target_revenue = float(tv["revenue"])
@@ -772,6 +814,8 @@ class CornerstoneWorkflow:
             ctx.extras.peer_recent_quotes = sdk_data["peer_recent_quotes"]
             ctx.extras.recent_hk_ipos = sdk_data["recent_hk_ipos"]
             ctx.extras.target_valuation = sdk_data.get("target_valuation")
+            ctx.extras.peer_announcements = sdk_data.get("peer_announcements", {})
+            ctx.extras.market_indices = sdk_data.get("market_indices", [])
             # 同步 target 营收/净利到既有字段, 让 comparable_valuation 工具能用
             tv = sdk_data.get("target_valuation") or {}
             if tv.get("revenue"):

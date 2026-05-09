@@ -210,6 +210,7 @@ def record_outcome_cmd(
     ipo_marketcap_b: float | None = typer.Option(None, "--ipo-marketcap-b", help="市值（亿港元）"),
     d1: float | None = typer.Option(None, "--d1", help="首日涨跌幅小数（0.15 = +15%）"),
     d30: float | None = typer.Option(None, "--d30"),
+    d90: float | None = typer.Option(None, "--d90"),
     d180: float | None = typer.Option(None, "--d180", help="6 月禁售期满收益"),
     d365: float | None = typer.Option(None, "--d365"),
     broken_ipo_d1: bool | None = typer.Option(None, "--broken-ipo-d1/--no-broken-ipo-d1"),
@@ -217,8 +218,25 @@ def record_outcome_cmd(
     max_dd_lockup: float | None = typer.Option(None, "--max-dd-lockup", help="锁定期最大回撤 %"),
     notes: str = typer.Option("", "--notes", "-n"),
     close: bool = typer.Option(False, "--close", help="同时把 prediction 状态置为 closed"),
+    auto_fetch: bool = typer.Option(
+        False,
+        "--auto-fetch",
+        help="给定 --ipo-price 后从 iFinD 自动拉历史 K 线计算 d1/d30/d90/d180/d365 等所有 returns。"
+        " 显式传的 --d1/--d30/... 优先级高于自动值。",
+    ),
+    listing_date: str | None = typer.Option(
+        None, "--listing-date", help="上市日期 YYYY-MM-DD（auto-fetch 时若 iFinD 拉不到可显式传）"
+    ),
+    ticker: str | None = typer.Option(
+        None, "--ticker", help="auto-fetch 用，未传时从 prediction 读"
+    ),
 ) -> None:
-    """录入实际投后表现，关联到指定 project_id。"""
+    """录入实际投后表现，关联到指定 project_id。
+
+    --auto-fetch 模式（推荐）：
+        给定 --ipo-price 后，从 iFinD 自动拉历史 K 线，算出 d1/d30/d90/d180/d365 收益、
+        是否破发、锁定期最大回撤、180 日均成交。用户只需手工填 --notes / 重大事件。
+    """
     _setup_logging()
     store = FeedbackStore()
     pred = store.get_prediction_by_project(project_id)
@@ -231,18 +249,58 @@ def record_outcome_cmd(
     ).fetchone()
     pred_id = pred_row["id"]
 
+    # auto-fetch: 从 iFinD 自动算 returns
+    auto: dict = {}
+    if auto_fetch:
+        if ipo_price is None:
+            console.print("[red]--auto-fetch 需要至少 --ipo-price[/red]")
+            raise typer.Exit(code=2)
+        eff_ticker = ticker or pred.ticker
+        try:
+            from src.data.ifind_sdk import compute_post_ipo_returns
+            console.print(
+                f"[cyan]正在从 iFinD 拉 {eff_ticker} 上市后股价（招股价 {ipo_price} HKD）...[/cyan]"
+            )
+            auto = compute_post_ipo_returns(
+                ticker=eff_ticker,
+                ipo_price=ipo_price,
+                listing_date=listing_date,
+            )
+            if auto.get("error"):
+                console.print(f"[red]iFinD 拉取失败: {auto['error']}[/red]")
+                raise typer.Exit(code=2)
+            console.print(f"[green]✓ 自动 fetch 完成，覆盖未显式传的字段[/green]")
+            console.print(
+                f"  上市日: {auto.get('listing_date')}, "
+                f"D1: {_pct(auto.get('d1_return'))}, "
+                f"D180: {_pct(auto.get('d180_return'))}, "
+                f"D365: {_pct(auto.get('d365_return'))}, "
+                f"破发(D180): {auto.get('was_broken_d180')}, "
+                f"最大回撤: {auto.get('max_drawdown_in_d180_pct')}%"
+            )
+        except Exception as e:
+            console.print(f"[red]auto-fetch 异常: {e}[/red]")
+            raise typer.Exit(code=2)
+
+    # 用户显式传 > auto > None
+    def _pick(user_v, auto_key):
+        return user_v if user_v is not None else auto.get(auto_key)
+
     outcome = Outcome(
         prediction_id=pred_id,
         recorded_date=datetime.now(),
         ipo_actual_price_hkd=ipo_price,
         ipo_actual_marketcap_hkd_billion=ipo_marketcap_b,
-        d1_return=d1,
-        d30_return=d30,
-        d180_return=d180,
-        d365_return=d365,
-        was_broken_ipo_d1=broken_ipo_d1,
-        was_broken_ipo_d180=broken_ipo_d180,
-        max_drawdown_in_lockup_pct=max_dd_lockup,
+        d1_return=_pick(d1, "d1_return"),
+        d30_return=_pick(d30, "d30_return"),
+        d90_return=_pick(d90, "d90_return"),
+        d180_return=_pick(d180, "d180_return"),
+        d365_return=_pick(d365, "d365_return"),
+        was_broken_ipo_d1=_pick(broken_ipo_d1, "was_broken_d1"),
+        was_broken_ipo_d180=_pick(broken_ipo_d180, "was_broken_d180"),
+        max_drawdown_in_lockup_pct=_pick(max_dd_lockup, "max_drawdown_in_d180_pct"),
+        avg_daily_turnover_hkd_m_d180=auto.get("avg_daily_turnover_hkd_m_d180"),
+        final_listing_date=_parse_iso_date(auto.get("listing_date")),
         user_notes=notes,
     )
     oid = store.record_outcome(outcome)
@@ -250,6 +308,25 @@ def record_outcome_cmd(
     if close:
         store.update_status(pred_id, "closed")
         console.print(f"[green]  prediction id={pred_id} 状态置为 closed[/green]")
+
+
+def _pct(v) -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v) * 100:.2f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _parse_iso_date(s):
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        from datetime import date as _date
+        return _date.fromisoformat(s[:10])
+    except Exception:
+        return None
 
 
 @app.command("list-predictions")
