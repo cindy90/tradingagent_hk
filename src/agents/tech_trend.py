@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from src.agents._template import TemplateAgent
 from src.agents.base import AgentContext
+from src.feedback.models import TechTrendScoreCard
 from src.llm import ModelTier
 
 SYSTEM = """你是技术战略分析师，专门评估科技/创新型公司的技术发展趋势。
@@ -24,6 +25,7 @@ class TechTrendAgent(TemplateAgent):
     description = "技术发展趋势 Agent"
     tier = ModelTier.ANALYZE
     SYSTEM = SYSTEM
+    score_card_class = TechTrendScoreCard
 
     def build_user_message(self, ctx: AgentContext) -> str:
         evidence = ""

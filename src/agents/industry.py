@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from src.agents._template import TemplateAgent
 from src.agents.base import AgentContext
+from src.feedback.models import IndustryScoreCard
 from src.llm import ModelTier
 
 SYSTEM = """你是港股 IPO 行业研究分析师。基于公司所属行业和招股书行业概览章节，输出：
@@ -23,6 +24,7 @@ class IndustryAgent(TemplateAgent):
     description = "行业研究 Agent"
     tier = ModelTier.ANALYZE
     SYSTEM = SYSTEM
+    score_card_class = IndustryScoreCard
 
     def build_user_message(self, ctx: AgentContext) -> str:
         evidence = ""

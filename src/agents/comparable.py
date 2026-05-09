@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from src.agents._template import TemplateAgent
 from src.agents.base import AgentContext
+from src.feedback.models import ComparableScoreCard
 from src.llm import ModelTier
 from src.tools.valuation import comparable_valuation
 
@@ -29,6 +30,7 @@ class ComparableAgent(TemplateAgent):
     description = "可比公司估值 Agent"
     tier = ModelTier.ANALYZE
     SYSTEM = SYSTEM
+    score_card_class = ComparableScoreCard
 
     def build_user_message(self, ctx: AgentContext) -> str:
         peers = ctx.extras.peers

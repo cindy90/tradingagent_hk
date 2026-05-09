@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from src.agents._template import TemplateAgent
 from src.agents.base import AgentContext
+from src.feedback.models import SentimentScoreCard
 from src.llm import ModelTier
 
 SYSTEM = """你是港股二级市场情绪分析师。基于近期市场表现、新股暗盘情况、同行业公司股价走势，输出：
@@ -20,6 +21,7 @@ class SentimentAgent(TemplateAgent):
     description = "二级市场情绪 Agent"
     tier = ModelTier.ANALYZE
     SYSTEM = SYSTEM
+    score_card_class = SentimentScoreCard
 
     def build_user_message(self, ctx: AgentContext) -> str:
         peers_quotes = ctx.extras.peer_recent_quotes

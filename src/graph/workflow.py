@@ -244,10 +244,90 @@ class CornerstoneWorkflow:
                 )
 
         self._write_ledger(ctx)
+        # 自动落库 Prediction（Phase A）
+        try:
+            self._persist_prediction(ctx)
+        except Exception as e:
+            logger.warning(f"prediction 落库失败（不影响报告产出）: {e}")
         logger.info(f"=== 工作流完成，报告目录: {ctx.reports_dir} ===")
         return ctx
 
     def _write_ledger(self, ctx: AgentContext) -> None:
+        from src.llm.pricing import estimate_total_cost_cny
+        from src.llm.router import ModelTier, resolve_model
+        tier_to_model = {t.value: resolve_model(t) for t in ModelTier}
+        cost = estimate_total_cost_cny(self.llm.ledger.by_tier, tier_to_model)
         (ctx.reports_dir / "_token_usage.md").write_text(
-            "# Token 使用账本\n\n" + self.llm.ledger.summary(), encoding="utf-8"
+            "# Token 使用账本\n\n"
+            + self.llm.ledger.summary()
+            + f"\n\n**预估成本: ¥{cost}**\n\n"
+            + "Tier → Model:\n"
+            + "\n".join(f"- {t}: `{m}`" for t, m in tier_to_model.items()),
+            encoding="utf-8",
         )
+
+    def _persist_prediction(self, ctx: AgentContext) -> None:
+        """把决议结果落到 feedback DB。决议缺失时跳过。"""
+        from datetime import datetime as _dt
+
+        from src.feedback import FeedbackStore
+        from src.feedback.models import Prediction
+        from src.llm.pricing import estimate_total_cost_cny
+        from src.llm.router import ModelTier, resolve_model
+
+        decision = ctx.extras.decision_json
+        if not decision:
+            logger.info("决议 JSON 缺失，跳过 prediction 落库")
+            return
+
+        amount = decision.get("suggested_amount_usd_million") or [0, 0]
+        valuation = decision.get("valuation_range_hkd_billion") or {}
+
+        agg = self.llm.ledger.by_tier
+        total_in = sum(s.get("input", 0) for s in agg.values())
+        total_out = sum(s.get("output", 0) for s in agg.values())
+        total_cache = sum(s.get("cache_read", 0) for s in agg.values())
+        tier_to_model = {t.value: resolve_model(t) for t in ModelTier}
+
+        from config import get_settings
+        s = get_settings()
+
+        score_cards = ctx.extras.misc.get("score_cards", {})
+
+        p = Prediction(
+            project_id=ctx.project_id,
+            ticker=ctx.ticker,
+            company_name=ctx.company_name,
+            industry=ctx.industry,
+            decision_date=_dt.now(),
+            recommendation=str(decision.get("recommendation", "")),
+            confidence=str(decision.get("confidence", "")),
+            valuation_low=valuation.get("low"),
+            valuation_mid=float(valuation.get("mid", 0) or 0),
+            valuation_high=valuation.get("high"),
+            anchor_method=str(valuation.get("anchor_method", "")),
+            anchor_logic=str(valuation.get("anchor_logic", "")),
+            ipo_pricing_view=str(decision.get("ipo_pricing_view", "")),
+            suggested_amount_low_usd_m=float(amount[0]) if len(amount) > 0 else 0,
+            suggested_amount_high_usd_m=float(amount[1]) if len(amount) > 1 else 0,
+            key_supports=list(decision.get("key_supports", [])),
+            key_risks=list(decision.get("key_risks", [])),
+            deal_conditions=list(decision.get("deal_conditions", [])),
+            monitoring_kpis=list(decision.get("monitoring_kpis", [])),
+            agent_score_cards=score_cards,
+            model_provider=s.llm_provider,
+            model_tier_models=tier_to_model,
+            total_input_tokens=total_in,
+            total_output_tokens=total_out,
+            total_cache_read_tokens=total_cache,
+            estimated_cost_cny=estimate_total_cost_cny(agg, tier_to_model),
+            cogalpha_features_used=["scoring_card"],
+            reports_dir_path=str(ctx.reports_dir),
+            status="open",
+        )
+        store = FeedbackStore()
+        try:
+            pid = store.save_prediction(p)
+            logger.info(f"prediction 已落库 id={pid}")
+        finally:
+            store.close()

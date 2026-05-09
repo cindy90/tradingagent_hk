@@ -250,7 +250,35 @@ python cli.py show-config
 - `reports/<project_id>/FINAL_MEMO.md` — 投决备忘录（给人看）
 - `reports/<project_id>/01_*.md` ~ `09_*.md` — 各 Agent 完整研究报告
 - `reports/<project_id>/*.brief.md` — 各 Agent 简报（流转用）
-- `reports/<project_id>/_token_usage.md` — token 消耗账本
+- `reports/<project_id>/_token_usage.md` — token 消耗账本 + 预估 ¥
+- 决议自动写入 `.cache/feedback.sqlite`（闭环学习数据库）
+
+### 闭环学习：录入实际投后表现
+
+运行 `analyze` 时决议会自动落库到 `feedback.sqlite`。等到上市后 1/30/180/365 天时，
+录入实际表现来积累训练/校准数据：
+
+```bash
+# 列出所有未结案的预测
+python cli.py list-predictions --status open
+
+# 录入实际结果（参数都是可选的，知道多少录多少）
+python cli.py record-outcome \
+    --project-id 02670_20260509_104530 \
+    --ipo-price 28.5 \
+    --d1 0.12 \
+    --d180 -0.08 \
+    --broken-ipo-d180 \
+    --notes "首日大涨次日破发，6 月内一直承压" \
+    --close
+
+# 全局统计 / 导出 CSV 做外部分析
+python cli.py stats
+python cli.py export-predictions --out reports/all_predictions.csv
+```
+
+数据积累到 5+ 案例后，Phase C 的 Postmortem Agent + Case RAG 会自动把历史决策的
+经验/教训注入到新分析中——这就是系统的"自我迭代"。
 
 ### 案例：珞石机器人（Loctek Robotics）测试流程
 
@@ -311,7 +339,9 @@ cat reports/02670_*/_token_usage.md
 
 - [x] 同花顺 QuantAPI 接入：token 管理、`report_query`、招股书 PDF 自动下载
 - [x] 同花顺 `THS_BD` / `THS_DR` / `THS_EDB` 接入：公司基础信息、行业研报、宏观指标
-- [x] 中文 embedding 切到 BGE-zh-v1.5（可通过 `EMBEDDING_MODEL` 调整为 small/large）
+- [x] 中文 embedding 切到 BGE-zh-v1.5
+- [x] **闭环学习 Phase A**：每个 Agent 双产出（markdown + ScoreCard JSON）；
+      预测自动落 SQLite；CLI `record-outcome` / `list-predictions` / `export-predictions` / `stats`
 - [ ] 港交所披露易爬虫实现
 - [ ] akshare 港股财务接口字段在不同版本的兼容（当前已做容错）
 - [ ] LangGraph 替换线性 workflow（如需图状条件分支）

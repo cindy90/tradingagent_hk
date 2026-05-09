@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 from src.agents.base import AgentContext, AgentReport, BaseAgent
+from src.agents.scoring import parse_score_card, schema_instruction, strip_score_card_block
 from src.agents.summarizer import Summarizer
+from src.feedback.models import ProspectusScoreCard
 from src.llm import ModelTier
 
 # 显式定义的检索主题。新增主题就加一行，不要让 LLM 自己发散查询。
@@ -57,6 +59,7 @@ class ProspectusAnalystAgent(BaseAgent):
     tier = ModelTier.ANALYZE
     description = "招股书深度分析 Agent"
     fatal = True  # 招股书分析失败时整个流程没意义，必须中止
+    score_card_class = ProspectusScoreCard
 
     def __init__(self, llm, summarizer: Summarizer | None = None):
         super().__init__(llm)
@@ -107,15 +110,23 @@ class ProspectusAnalystAgent(BaseAgent):
             f"请基于以上证据生成完整的招股书深度分析报告。"
         )
 
+        system = ANALYST_SYSTEM + schema_instruction(self.score_card_class)
         resp = self.llm.complete(
             tier=self.tier,
-            system=ANALYST_SYSTEM,
+            system=system,
             messages=[{"role": "user", "content": user_msg}],
             cached_system_blocks=ctx.cached_blocks or None,
-            max_tokens=6000,
+            max_tokens=6500,
             temperature=0.2,
         )
-        full = resp.text
+        raw = resp.text
+
+        sc = parse_score_card(raw, self.score_card_class, agent_name=self.name)
+        if sc is not None:
+            cards = ctx.extras.misc.setdefault("score_cards", {})
+            cards[self.name] = sc.model_dump()
+
+        full = strip_score_card_block(raw)
         brief = self.summarizer.compress(full, agent_name=self.name)
 
         ctx.full_reports[self.name] = full

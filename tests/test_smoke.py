@@ -243,6 +243,129 @@ def test_is_meaningful_table_filters_empty() -> None:
     ]) is True
 
 
+def test_score_card_schema_instruction_includes_fields() -> None:
+    from src.agents.scoring import schema_instruction
+    from src.feedback.models import IndustryScoreCard
+
+    txt = schema_instruction(IndustryScoreCard)
+    assert "industry_score" in txt
+    assert "competition_intensity" in txt
+    # 必须明确要求一段 ```json``` 代码块
+    assert "```json" in txt
+    assert "只输出一段 json" in txt or "only" in txt.lower() or "不要重复" in txt
+
+
+def test_parse_score_card_extracts_last_json_block() -> None:
+    """LLM 输出含 markdown + 末尾 json 代码块，应只取最后一个。"""
+    from src.agents.scoring import parse_score_card
+    from src.feedback.models import RiskScoreCard
+
+    txt = """## 一、财务造假风险
+评级 4 ...
+
+## 综合
+- 综合风控评级: 3.5
+
+```json
+{
+  "summary": "整体可控",
+  "overall_score": 3.5,
+  "confidence": "中",
+  "evidence_pages": [108, 200],
+  "notes": "",
+  "overall_risk_level": 3.5,
+  "risk_dimensions": {"财务造假": 4.0, "估值高估": 2.5},
+  "veto_conditions": ["上市前估值不超过 100 亿港元"],
+  "must_satisfy_conditions": []
+}
+```"""
+    sc = parse_score_card(txt, RiskScoreCard, agent_name="risk")
+    assert sc is not None
+    assert sc.overall_risk_level == 3.5
+    assert sc.veto_conditions == ["上市前估值不超过 100 亿港元"]
+
+
+def test_parse_score_card_returns_none_on_invalid_schema() -> None:
+    from src.agents.scoring import parse_score_card
+    from src.feedback.models import IndustryScoreCard
+
+    txt = '```json\n{"summary": "x"}\n```'  # 缺多个必填字段
+    sc = parse_score_card(txt, IndustryScoreCard, agent_name="industry")
+    assert sc is None
+
+
+def test_strip_score_card_block_removes_last_json() -> None:
+    from src.agents.scoring import strip_score_card_block
+
+    txt = "## 报告\n\n正文...\n\n```json\n{\"x\": 1}\n```"
+    out = strip_score_card_block(txt)
+    assert "```json" not in out
+    assert "正文" in out
+
+
+def test_feedback_store_round_trip(tmp_path) -> None:
+    from datetime import datetime
+    from src.feedback import FeedbackStore
+    from src.feedback.models import Outcome, Prediction
+
+    s = FeedbackStore(db_path=tmp_path / "test.sqlite")
+    p = Prediction(
+        project_id="abc_001", ticker="02670", company_name="测试机器人",
+        industry="工业机器人", decision_date=datetime.now(),
+        recommendation="审慎参与", confidence="中",
+        valuation_low=60, valuation_mid=80, valuation_high=100,
+        anchor_method="PE", anchor_logic="对标可比中位数 25x",
+        ipo_pricing_view="合理",
+        suggested_amount_low_usd_m=10, suggested_amount_high_usd_m=20,
+        key_supports=["技术领先"], key_risks=["客户集中度高"],
+        agent_score_cards={"industry": {"industry_score": 4.0, "summary": "x"}},
+        model_provider="kimi",
+        model_tier_models={"analyze": "moonshot-v1-32k"},
+        total_input_tokens=100000, total_output_tokens=20000,
+        estimated_cost_cny=2.4,
+    )
+    pid = s.save_prediction(p)
+    assert pid > 0
+
+    # idempotent on duplicate project_id
+    pid2 = s.save_prediction(p)
+    assert pid2 == pid
+
+    p2 = s.get_prediction(pid)
+    assert p2 is not None
+    assert p2.recommendation == "审慎参与"
+    assert p2.key_supports == ["技术领先"]
+    assert p2.agent_score_cards["industry"]["industry_score"] == 4.0
+
+    o = Outcome(
+        prediction_id=pid, recorded_date=datetime.now(),
+        ipo_actual_price_hkd=25.5, d1_return=0.12, d180_return=-0.08,
+        was_broken_ipo_d1=False, was_broken_ipo_d180=True,
+        notable_events=["管理层变动"],
+    )
+    s.record_outcome(o)
+    o2 = s.latest_outcome(pid)
+    assert o2 is not None
+    assert o2.d180_return == -0.08
+    assert o2.was_broken_ipo_d180 is True
+    assert o2.notable_events == ["管理层变动"]
+
+    stats = s.stats_summary()
+    assert stats["predictions_total"] == 1
+    assert stats["outcomes_total"] == 1
+
+
+def test_pricing_estimates_reasonable_values() -> None:
+    from src.llm.pricing import estimate_cost_cny
+
+    # Sonnet 1M input + 200K output: $22 + $108×0.2 = 约 ¥43.6
+    cost = estimate_cost_cny("claude-sonnet-4-6", 1_000_000, 200_000, 0)
+    assert 40 < cost < 50
+
+    # 未知模型返回 0，不抛异常
+    assert estimate_cost_cny("unknown-model", 1000, 100, 0) == 0.0
+
+
 def test_select_cached_blocks_picks_key_sections() -> None:
     from src.data.prospectus import ProspectusChunk
     from src.graph.workflow import select_cached_blocks

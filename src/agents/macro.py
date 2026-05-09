@@ -3,6 +3,7 @@ from __future__ import annotations
 from src.agents._template import TemplateAgent
 from src.agents.base import AgentContext
 from src.data.akshare_client import get_hsi_index
+from src.feedback.models import MacroScoreCard
 from src.llm import ModelTier
 
 SYSTEM = """你是港股市场宏观策略分析师。基于当前宏观环境，分析对本 IPO 基石认购的影响：
@@ -22,6 +23,7 @@ class MacroAgent(TemplateAgent):
     description = "宏观策略 Agent"
     tier = ModelTier.ANALYZE
     SYSTEM = SYSTEM
+    score_card_class = MacroScoreCard
 
     def build_user_message(self, ctx: AgentContext) -> str:
         hsi = get_hsi_index()

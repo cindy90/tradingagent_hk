@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from src.agents._template import TemplateAgent, briefs_context
 from src.agents.base import AgentContext
+from src.feedback.models import RiskScoreCard
 from src.llm import ModelTier
 
 SYSTEM = """你是基石投资委员会的风控总监，独立于研究端。基于所有研究 Agent 简报和 Bull/Bear 辩论结论，
@@ -30,6 +31,7 @@ class RiskAgent(TemplateAgent):
     description = "风控委员会 Agent"
     tier = ModelTier.ANALYZE
     SYSTEM = SYSTEM
+    score_card_class = RiskScoreCard
 
     def build_user_message(self, ctx: AgentContext) -> str:
         upstream = [
