@@ -1722,3 +1722,187 @@ def test_write_final_summary_no_html_skips_html(tmp_path) -> None:
     write_final_summary(ctx, also_html=False)
     assert (tmp_path / "FINAL_MEMO.md").exists()
     assert not (tmp_path / "FINAL_MEMO.html").exists()
+
+
+# ============================================================================
+# Decision schema v3 推理链 / 假设清单 / 估值分拆 测试
+# ============================================================================
+
+def test_decision_schema_v3_supports_reasoning_chain() -> None:
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "审慎参与",
+        "confidence": "中",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {
+            "low": 50, "mid": 80, "high": 110,
+            "anchor_method": "多方法加权",
+            "anchor_logic": "PS 50% + PEG 30% + SOTP 20%",
+            "methodology_breakdown": [
+                {"method": "PS", "peer_basis": "可比中位 22x",
+                 "target_metric": "2025E 营收 3.6 亿", "formula": "22 × 3.6 = 79",
+                 "result_hkd_b": 88.0, "weight": 0.5},
+                {"method": "PEG", "peer_basis": "PEG 1.4x",
+                 "target_metric": "PE 70 × CAGR 35%", "formula": "1.4 × 70 × 0.7 = 68.6",
+                 "result_hkd_b": 70.0, "weight": 0.3},
+            ],
+            "key_assumptions": ["营收 CAGR 35%", "毛利稳定 38%"],
+        },
+        "ipo_pricing_view": "合理",
+        "key_supports": ["x"],
+        "key_risks": ["y"],
+        "sensitivity_table": [
+            {"name": "悲观", "triggers": ["毛利<30%"], "valuation_hkd_b": 45,
+             "probability": 0.3, "expected_return_pct": -44.0,
+             "valuation_derivation": "毛利 38→30%, PS 压缩 25% → 60",
+             "probability_rationale": "近 3 月港股机器人 IPO 破发率 30%"},
+        ],
+        "kill_switches": [
+            {"trigger": "CTO 离职 30 天内", "action": "减持 100%", "severity": "高",
+             "rationale": "创始人股权 35%, 历史回撤中位 40%",
+             "historical_precedent": "2024 年 X 公司"},
+        ],
+        "monitoring_kpis_detailed": [
+            {"name": "毛利率", "threshold": "< 30%", "frequency": "季报",
+             "action_if_breach": "减持 30%",
+             "threshold_rationale": "行业中位 35%, 留 5pp 缓冲",
+             "industry_benchmark": "中位 35% / 75 分位 42%"},
+        ],
+        "key_assumptions": [
+            "2025E 营收 3.6 亿",
+            "毛利率维持 38% ± 3pp",
+            "PS 不压缩 > 25%",
+        ],
+        "reasoning_chain": [
+            {"step_no": 1, "title": "业务质量评估",
+             "premise": "协作机器人主业",
+             "data_source": "prospectus_analyst: 营收 4.2 亿",
+             "calculation": "vs 行业中位高 100%",
+             "conclusion": "+10% 估值溢价",
+             "confidence": "中",
+             "caveats": ["客户集中度高"]},
+            {"step_no": 2, "title": "估值起点",
+             "premise": "PS 估值",
+             "data_source": "comparable: 越疆 PS=27",
+             "calculation": "22 × 3.6 = 79",
+             "conclusion": "基准估值 88 亿 HKD",
+             "confidence": "中"},
+        ],
+    }
+    result, err = validate_decision(parsed)
+    assert result is not None, f"v3 schema 校验失败: {err}"
+    # 推理链
+    assert len(result.reasoning_chain) == 2
+    assert result.reasoning_chain[0].title == "业务质量评估"
+    assert result.reasoning_chain[0].caveats == ["客户集中度高"]
+    # 关键假设
+    assert len(result.key_assumptions) == 3
+    # 估值方法分拆
+    assert len(result.valuation_range_hkd_billion.methodology_breakdown) == 2
+    assert result.valuation_range_hkd_billion.methodology_breakdown[0].method == "PS"
+    assert result.valuation_range_hkd_billion.methodology_breakdown[0].formula == "22 × 3.6 = 79"
+    # 估值 key_assumptions
+    assert len(result.valuation_range_hkd_billion.key_assumptions) == 2
+    # sensitivity reasoning
+    assert "毛利 38→30%" in result.sensitivity_table[0].valuation_derivation
+    assert result.sensitivity_table[0].probability_rationale != ""
+    # kill switch rationale
+    assert "创始人股权 35%" in result.kill_switches[0].rationale
+    # KPI rationale
+    assert result.monitoring_kpis_detailed[0].threshold_rationale != ""
+    assert result.monitoring_kpis_detailed[0].industry_benchmark != ""
+
+
+def test_decision_schema_v3_backward_compat_no_reasoning_chain() -> None:
+    """旧 schema (没有 v3 字段) 仍能 validate. 推理链字段默认空 list."""
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "认购",
+        "confidence": "高",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {"mid": 80.0, "anchor_method": "PE", "anchor_logic": "x"},
+        "ipo_pricing_view": "合理",
+        "key_supports": ["a"],
+        "key_risks": ["b"],
+    }
+    result, err = validate_decision(parsed)
+    assert result is not None
+    # v3 字段默认空
+    assert result.reasoning_chain == []
+    assert result.key_assumptions == []
+    assert result.valuation_range_hkd_billion.methodology_breakdown == []
+
+
+def test_html_renders_reasoning_chain_and_assumptions(tmp_path) -> None:
+    """HTML 模板正确渲染 v3 新区."""
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.reports.html_writer import write_ic_memo_html
+
+    extras = WorkflowExtras()
+    extras.decision_json = {
+        "recommendation": "认购", "confidence": "高",
+        "valuation_range_hkd_billion": {
+            "mid": 80, "anchor_method": "PEG", "anchor_logic": "x",
+            "methodology_breakdown": [
+                {"method": "PS", "peer_basis": "中位 22x", "target_metric": "营收 3.6 亿",
+                 "formula": "22 × 3.6 = 79", "result_hkd_b": 79, "weight": 0.5},
+            ],
+            "key_assumptions": ["营收 CAGR 35%"],
+        },
+        "ipo_pricing_view": "合理",
+        "suggested_amount_usd_million": [10, 20],
+        "key_supports": ["x"], "key_risks": ["y"],
+        "key_assumptions": [
+            "假设 1: 营收增速保持 35%",
+            "假设 2: 创始人不离职",
+        ],
+        "reasoning_chain": [
+            {"step_no": 1, "title": "业务质量",
+             "premise": "协作机器人", "data_source": "prospectus: 营收 4.2 亿",
+             "calculation": "vs 行业 +100%", "conclusion": "+10% 溢价",
+             "confidence": "中", "caveats": ["集中度风险"]},
+        ],
+        "sensitivity_table": [
+            {"name": "悲观", "triggers": ["毛利<30%"], "valuation_hkd_b": 45,
+             "probability": 0.3, "expected_return_pct": -44.0,
+             "valuation_derivation": "毛利压缩, PS 25% 压力",
+             "probability_rationale": "历史破发率 30%"},
+        ],
+        "kill_switches": [
+            {"trigger": "CTO 离职", "action": "减持 100%", "severity": "高",
+             "rationale": "创始人股权 35%, 历史中位回撤 40%"},
+        ],
+        "monitoring_kpis_detailed": [
+            {"name": "毛利率", "threshold": "< 30%", "frequency": "季报",
+             "action_if_breach": "减持 30%",
+             "threshold_rationale": "行业中位 35%, 留 5pp 缓冲"},
+        ],
+    }
+    ctx = AgentContext(
+        project_id="v3_html_test", ticker="X", company_name="测试",
+        industry="x", reports_dir=tmp_path, rag=None, extras=extras,
+    )
+    out = write_ic_memo_html(ctx)
+    text = out.read_text(encoding="utf-8")
+    # v3 关键章节
+    assert "关键假设清单" in text
+    assert "估值方法分拆" in text
+    assert "推理链" in text
+    # 推理步骤内容
+    assert "业务质量" in text
+    assert "+10% 溢价" in text
+    assert "集中度风险" in text  # caveats
+    assert "conf-中" in text  # 置信度 CSS 类
+    # 估值方法卡
+    assert "method-card" in text
+    assert "22 × 3.6 = 79" in text  # formula
+    # rationale tooltip
+    assert "data-rationale" in text
+    assert "毛利压缩" in text  # sensitivity reasoning
+    assert "创始人股权 35%" in text  # kill switch rationale
+    assert "行业中位 35%" in text  # KPI rationale
+    # 假设清单
+    assert "假设 1: 营收增速保持 35%" in text

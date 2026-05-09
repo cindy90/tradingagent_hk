@@ -42,32 +42,78 @@ DECISION_SYSTEM = """你是港股 IPO 基石投资委员会的首席投决官，
 - monitoring_kpis 必须**可观测**（"Q1 经营现金流 vs 阈值" 优于 "管理层执行力"）。
 - 提到具体公司时, 只允许使用上游 Agent 简报已用过的公司名。
 
-【专业级新增要求】
+【专业级新增要求 — 必须输出"推理链"让用户能 trace 每个量化结论】
+
 1. **三档情景敏感性分析（必填 sensitivity_table）**:
    - "悲观" / "基准" / "乐观" 三档, 每档明确给出:
      * triggers: 1-3 条触发该情景的条件（必须可量化, 例如"H1 毛利率 < 30%" 而非"业绩疲弱"）
      * valuation_hkd_b: 该情景下的合理估值
      * probability: 主观概率 0-1, 三档之和应 ≈ 1.0
      * expected_return_pct: 该情景下相对招股价的回报率（%）
+     * **valuation_derivation**: 估值如何从 triggers 推算出的（必填, 一句话公式）
+       例: "毛利率从 38% 降至 30% → PS 压缩 25% → 80×0.75≈60, 再扣行业逆风折让 25% = 45"
+     * **probability_rationale**: 概率赋值依据（必填, 必须有数据基础）
+       例: "近 3 月港股机器人 IPO 6 个月内破发率 30%; 加上本项目客户集中度高调高 5pp 至 35%"
    - 这三档同时也是 Bull/Bear 辩论结论的"事后可验证清单"
 
-2. **对冲与退出策略（hedging_strategy + exit_plan）**:
-   - hedging_strategy: 锁定期 6 个月内的对冲思路（恒生科技 ETF PUT / 行业 long-short / 不对冲）
-     * instrument / target_coverage_pct (0-1, 名义本金占比) / rationale
-   - exit_plan: 解禁日的减持节奏
-     * horizon ("解禁日 D+0" / "T+5") / method ("VWAP" / "市价" / "限价") / pace ("一次性" / "分 5 日") /
-       trigger_conditions（提前减持的条件）
+2. **估值方法分拆（valuation_range_hkd_billion.methodology_breakdown）⭐**:
+   - 至少给 2-3 种估值方法的具体推算（PE / PS / PEG / EV-EBITDA / SOTP / DCF）
+   - 每种方法填:
+     * peer_basis: "可比 X PS 中位数 22x (越疆 27x / 华沿 18x)"  (必须引用 comparable 简报具体数字)
+     * target_metric: "2025E 营收 3.6 亿 RMB" (必须明确口径 + 来源)
+     * formula: "22 × 3.6 = 79.2 亿 RMB ≈ 88 亿 HKD (按 1.1 汇率)"
+     * result_hkd_b: 88
+     * weight: 该方法在加权综合估值中的权重 (各方法权重之和应 ≈ 1)
+   - 这让审计能直接看到"22x 哪来的""3.6 亿哪来的""为什么不用 PE"
+   - **valuation_range_hkd_billion.key_assumptions**: 估值依赖的 3-5 条关键假设
+     例: ["2025E 营收 3.6 亿（+38% YoY）", "毛利率维持 38%", "可比 PS 中位 22x 不发生 25%+ 压缩"]
 
-3. **kill_switches（认购后退出触发）**:
-   - 已认购后某些事件应触发立刻减持/对冲, 列出 3-5 条:
+3. **对冲与退出策略（hedging_strategy + exit_plan）**:
+   - hedging_strategy: 锁定期 6 个月内的对冲思路（恒生科技 ETF PUT / 行业 long-short / 不对冲）
+   - exit_plan: 解禁日的减持节奏
+
+4. **kill_switches（认购后退出触发）⭐ 每条必须有 rationale**:
+   - 列出 3-5 条:
      * trigger: 触发事件描述（必须可观测, 如"创始人或 CTO 任一离职 30 天内"）
      * action: 对应动作（"立刻减持 100%" / "对冲 30% 名义本金" / "暂停认购"）
      * severity: "高" / "中" / "低"
+     * **rationale: 为什么这个阈值**（必填, 不能空）
+       例: "创始人股权占比 35%, 历史 IPO 案例显示创始人 30 天内离职后股价中位回撤 40%"
+     * historical_precedent: 可选 — 相似案例
 
-4. **monitoring_kpis 升级**:
-   - 不再是文本列表, 而是结构化:
-     * name (KPI 名) / threshold (阈值, 如"< 30%"或"> 200 天") /
-       frequency ("季报" / "月报" / "事件触发") / action_if_breach（违阈后的动作）
+5. **monitoring_kpis_detailed（每条加 threshold_rationale + industry_benchmark）⭐**:
+   - name (KPI 名) / threshold (如 "< 30%") / frequency / action_if_breach
+   - **threshold_rationale: 为什么阈值是这个数**
+     例: "毛利率行业中位 35%, 招股书披露 38%, 留 8pp 缓冲设阈值 30%"
+   - **industry_benchmark**: 可选 — 行业对比基准
+
+6. **key_assumptions（投决依赖的核心假设, 5-10 条）⭐**:
+   - 把整个推理依赖的"如果不对就要重新评估"的假设列出来
+   - 每条须可量化、可证伪
+   - 例:
+     ["2025E 营收 3.6 亿 RMB (+38% YoY) — 来自 prospectus_analyst 财务预测",
+      "毛利率维持 38% ± 3pp (vs 行业中位 35%)",
+      "可比公司 PS 中位 22x 在锁定期内不发生 > 25% 压缩",
+      "无重大监管变动 (中美博弈不升级 / 香港数据出境政策稳定)",
+      "创始人 / 核心管理层在锁定期内不离职"]
+
+7. **reasoning_chain（5-10 步关键推理链）⭐⭐**:
+   - 这是整份 IC memo 的灵魂——把"如何从一堆 Agent 简报推到最终建议"的链条显式写出
+   - 每步含: step_no / title / premise / data_source / calculation / conclusion / confidence / caveats
+   - 推理顺序通常是:
+     步 1: 业务质量评估 (来自 prospectus_analyst)
+     步 2: 行业空间与公司定位 (来自 industry)
+     步 3: 估值起点 — 可比公司 PS 锚定 (来自 comparable)
+     步 4: 估值修正 — IPO 折扣 / 增长溢价 (PEG)
+     步 5: 风险约束 (来自 risk Agent)
+     步 6: 宏观窗口判断 (来自 macro)
+     步 7: 综合三档情景 → 期望回报
+     步 8: 与 Bull/Bear 辩论结论核对 (来自 debate_manager)
+     步 9: 数字交叉核对 (来自 fact_check)
+     步 10: 最终建议
+   - 每步的 calculation 必须给具体公式或文字描述, 不能是"综合考虑"
+   - confidence 反映该步骤的把握度 (高/中/低)
+   - caveats: 该步骤潜在异议, 例:"假设 PS 22x 不变, 但若行业受冲击可能压缩到 15x"
 
 输出严格按下述 JSON 结构（用 ```json``` 代码块包裹），之后再补一段中文论述（不超过 1200 字）：
 
@@ -79,19 +125,35 @@ DECISION_SYSTEM = """你是港股 IPO 基石投资委员会的首席投决官，
   "valuation_range_hkd_billion": {
     "low": <数字>, "mid": <数字>, "high": <数字>,
     "anchor_method": "PE|PS|EV/EBITDA|DCF|多方法加权|PEG",
-    "anchor_logic": "<一句话锚定逻辑, 必须引用 comparable agent 的具体倍数>"
+    "anchor_logic": "<一句话锚定逻辑, 必须引用 comparable agent 的具体倍数>",
+    "methodology_breakdown": [
+      {"method": "PS", "peer_basis": "可比 PS 中位 22x (越疆 27/华沿 18)",
+       "target_metric": "2025E 营收 3.6 亿 RMB", "formula": "22 × 3.6 ≈ 79 亿 RMB ≈ 88 亿 HKD",
+       "result_hkd_b": 88.0, "weight": 0.5},
+      {"method": "PEG", "peer_basis": "可比 PEG 中位 1.4x (按 35% CAGR)",
+       "target_metric": "PE × CAGR = 70 × 0.35", "formula": "1.4 × 净利润 0.7 亿 RMB × 70 = ...",
+       "result_hkd_b": 70.0, "weight": 0.3},
+      {"method": "SOTP", "peer_basis": "硬件本体 PS 5x + 协作 PS 12x + 具身 PS 25x",
+       "target_metric": "三业务收入 1.5/1.2/0.9 亿", "formula": "1.5×5+1.2×12+0.9×25=44.4 亿 RMB",
+       "result_hkd_b": 49.0, "weight": 0.2}
+    ],
+    "key_assumptions": ["2025E 营收 3.6 亿 (+38% YoY)", "毛利率维持 38%",
+                        "可比 PS 不发生 > 25% 压缩"]
   },
   "ipo_pricing_view": "估值偏低|合理|偏高|严重高估",
   "sensitivity_table": [
     {
-      "name": "悲观",
-      "triggers": ["H1 毛利率 < 30%", "Q1 经营现金流转负"],
-      "valuation_hkd_b": 45.0,
-      "probability": 0.30,
-      "expected_return_pct": -44.0
+      "name": "悲观", "triggers": ["H1 毛利率 < 30%", "Q1 经营现金流转负"],
+      "valuation_hkd_b": 45.0, "probability": 0.30, "expected_return_pct": -44.0,
+      "valuation_derivation": "毛利从 38% → 30%, PS 压缩 25% → 80×0.75=60; 再扣行业逆风折让 25% = 45",
+      "probability_rationale": "近 3 月港股机器人 IPO 6 月内破发率 30%; 客户集中度高调高 5pp 至 35%, 取均值 30%"
     },
-    {"name": "基准", "triggers": [...], "valuation_hkd_b": 80.0, "probability": 0.50, "expected_return_pct": 0.0},
-    {"name": "乐观", "triggers": [...], "valuation_hkd_b": 130.0, "probability": 0.20, "expected_return_pct": 62.5}
+    {"name": "基准", "triggers": ["持平"], "valuation_hkd_b": 80.0, "probability": 0.50, "expected_return_pct": 0.0,
+     "valuation_derivation": "可比 PS 中位 22x × 2025E 营收 3.6 亿 ≈ 79 亿 RMB ≈ 88 亿 HKD, 加权降至 80",
+     "probability_rationale": "财务符合招股书披露 + 无极端事件; 概率赋值 50% 居中"},
+    {"name": "乐观", "triggers": ["第二曲线兑现"], "valuation_hkd_b": 130.0, "probability": 0.20, "expected_return_pct": 62.5,
+     "valuation_derivation": "具身智能业务收入占比从 9% 升至 18%, SOTP 估值贡献 +50% → 130 亿",
+     "probability_rationale": "招股书披露 H2 大客户订单, 但兑现概率经验值 20-30%, 取下沿 20%"}
   ],
   "hedging_strategy": {
     "instrument": "恒生科技 ETF (3033.HK) PUT / 不对冲",
@@ -105,49 +167,113 @@ DECISION_SYSTEM = """你是港股 IPO 基石投资委员会的首席投决官，
     "trigger_conditions": ["<提前减持的硬性条件, 如:解禁前股价跌破招股价 30%>"]
   },
   "kill_switches": [
-    {"trigger": "创始人或 CTO 任一在 30 天内离职", "action": "立刻减持 100%", "severity": "高"},
-    {"trigger": "监管问询函连续 2 次同类", "action": "减持 50% + 对冲剩余", "severity": "高"},
-    {"trigger": "Q1 经营现金流连续两季为负", "action": "启动 ETF PUT 对冲", "severity": "中"}
+    {"trigger": "创始人或 CTO 任一在 30 天内离职", "action": "立刻减持 100%", "severity": "高",
+     "rationale": "创始人股权 35%, 历史 IPO 案例创始人 30 天离职股价中位回撤 40%",
+     "historical_precedent": "2024 年 X 公司 CTO 离职 D+15 股价跌 38%"},
+    {"trigger": "监管问询函连续 2 次同类", "action": "减持 50% + 对冲剩余", "severity": "高",
+     "rationale": "连续问询暗示实质合规问题, 2 次同类是显著信号"},
+    {"trigger": "Q1 经营现金流连续两季为负", "action": "启动 ETF PUT 对冲", "severity": "中",
+     "rationale": "本项目财务质量是基石认购核心假设, 现金流恶化触发风险敞口控制"}
   ],
   "key_supports": ["<3-5 条支持理由，每条不超过 30 字>"],
   "key_risks": ["<3-5 条核心风险，每条不超过 30 字>"],
   "deal_conditions": ["<对基石条款/估值的硬性要求, 必须可量化>"],
   "monitoring_kpis": ["<向后兼容的简短文本列表, 由 monitoring_kpis_detailed 自动生成>"],
   "monitoring_kpis_detailed": [
+    {"name": "毛利率", "threshold": "< 30%", "frequency": "季报",
+     "action_if_breach": "触发风险评估 + 考虑减持 30%",
+     "threshold_rationale": "招股书披露 38% / 行业中位 35%, 30% 是行业 10 分位 = 显著恶化",
+     "industry_benchmark": "行业中位 35%, 75 分位 42%, 25 分位 28%"}
+  ],
+  "key_assumptions": [
+    "2025E 营收 3.6 亿 RMB (+38% YoY) — 招股书 P.108 财务预测",
+    "毛利率维持 38% ± 3pp (vs 行业中位 35%)",
+    "可比公司 PS 中位 22x 在锁定期内不发生 > 25% 压缩",
+    "无重大监管变动 (中美博弈不升级 / 香港数据出境政策稳定)",
+    "创始人 + CTO 在锁定期内不离职 (创始人股权 35%, 锁定 36 月)"
+  ],
+  "reasoning_chain": [
     {
-      "name": "毛利率",
-      "threshold": "< 30%",
-      "frequency": "季报",
-      "action_if_breach": "触发风险评估 + 考虑减持 30%"
-    }
+      "step_no": 1, "title": "业务质量评估",
+      "premise": "公司主业为协作机器人, 第二曲线为具身智能",
+      "data_source": "prospectus_analyst: 营收 4.2 亿 (CAGR 35%), 毛利 38%",
+      "calculation": "对比行业中位 (营收 2 亿, 毛利 32%): 营收高 100%, 毛利高 6pp",
+      "conclusion": "业务质量优于行业中位, 给基础估值 + 10% 溢价",
+      "confidence": "中",
+      "caveats": ["客户集中度 top5 = 65% 偏高, 单大客户失约影响显著"]
+    },
+    {
+      "step_no": 2, "title": "估值起点 — 可比公司 PS 锚定",
+      "premise": "采用 PS 估值, 因公司尚未稳定盈利",
+      "data_source": "comparable: 越疆 PS=27 / 华沿 PS=18, 中位 22x",
+      "calculation": "22 × 3.6 亿 RMB = 79.2 亿 RMB ≈ 88 亿 HKD (汇率 1.1)",
+      "conclusion": "PS 法基准估值 ≈ 88 亿 HKD",
+      "confidence": "中",
+      "caveats": ["可比仅 2 家, 样本小; 越疆已上市 1 年, 估值更稳定"]
+    },
+    "... (再列 5-8 步)"
   ]
 }
 ```
 
-之后用以下 Markdown 章节展开论述（新增 4 节是专业级 IC memo 必备）：
+之后用以下 Markdown 章节展开论述：
 
 ## 一、投决论述
-（综合论证，引用各 Agent 简报中的证据）
+综合论证，引用各 Agent 简报中的证据。这一章是给"快速读者"的——执行摘要后的扩展版。
 
-## 二、与 Bull/Bear 辩论的关系
-（说明你采纳了哪一方哪些观点，为什么）
+## 二、关键假设清单 (Key Assumptions) ⭐
+列出本投决依赖的 5-10 条核心假设, 每条标注:
+- 假设内容（可量化）
+- 数据来源（哪个 Agent / 招股书第几页）
+- 假设被颠覆的后果（决议如何变化）
+**这一章让用户看到"如果哪条假设错了, 结论会不同"**
 
-## 三、敏感性分析详解 ⭐
-（针对悲观/基准/乐观三档, 解释 triggers 为何可量化, 估值如何反推, 概率如何主观赋值）
+## 三、估值方法分拆详解 ⭐
+对每种估值方法（PE / PS / PEG / SOTP / DCF）分别展开:
+- 为什么选这个方法（公司特征 / 行业惯例）
+- 输入数据（peer / target metric, 来自哪个 Agent）
+- 计算公式 + 中间结果
+- 该方法的局限性
+**这一章让用户看到"22x × 3.6 = 79"这种具体推算, 而非"凭经验估 80 亿"**
 
-## 四、对冲与退出策略 ⭐
-（解释 hedging_strategy 和 exit_plan 的逻辑, 为什么这种节奏 / 工具）
+## 四、敏感性分析详解 ⭐
+针对悲观/基准/乐观三档, 解释:
+- triggers 为何可量化、阈值如何设定
+- valuation 如何从 trigger 反推（公式或文字描述）
+- probability 如何主观赋值（历史基准 / 专家判断 / 蒙特卡洛）
 
-## 五、Kill Switches 触发条件 ⭐
-（解释每条退出触发的合理性, 指出对应的 monitoring_kpis）
+## 五、推理链 (Reasoning Chain) ⭐⭐
+**这是本份 memo 的核心交付物**——把"从一堆 Agent 简报推到最终建议"的链条显式化:
+- 5-10 步关键推理, 每步标注 前提 → 数据 → 计算 → 结论 → 异议
+- 让用户能 trace 任意量化结论的来源
 
-## 六、风险敞口与不确定性
-（列出主要不确定性和应对方式, 引用风控简报）"""
+## 六、对冲与退出策略
+解释 hedging_strategy 和 exit_plan 的逻辑, 为什么这种节奏 / 工具。
+
+## 七、Kill Switches 触发条件
+解释每条退出触发的合理性, 指出对应的 monitoring_kpis 和阈值依据。
+
+## 八、与 Bull/Bear 辩论的关系
+说明你采纳了哪一方哪些观点, 为什么。
+
+## 九、风险敞口与不确定性
+列出主要不确定性和应对方式, 引用风控简报。"""
 
 
 _REC_VALUES = {"认购", "审慎参与", "观望", "不认购"}
 _CONF_VALUES = {"高", "中", "低"}
 _PRICING_VALUES = {"估值偏低", "合理", "偏高", "严重高估"}
+
+
+class ValuationMethodResult(BaseModel):
+    """单一估值方法的具体推算（让用户看到 22x × 3.6 = 79）。"""
+    model_config = ConfigDict(extra="ignore")
+    method: str  # "PE" / "PS" / "PEG" / "EV/EBITDA" / "SOTP" / "DCF"
+    peer_basis: str = ""  # 例: "可比公司 PS 中位数 22x (越疆 27x / 华沿 18x)"
+    target_metric: str = ""  # 例: "2025E 营收 3.6 亿 RMB"
+    formula: str = ""  # 例: "22 × 3.6 = 79.2 亿 RMB ≈ 88 亿 HKD"
+    result_hkd_b: float | None = None
+    weight: float = Field(default=1.0, ge=0, le=1, description="该方法在加权综合估值中的权重")
 
 
 class ValuationRange(BaseModel):
@@ -156,6 +282,15 @@ class ValuationRange(BaseModel):
     high: float | None = None
     anchor_method: str
     anchor_logic: str
+    # 新增: 估值推算的具体分拆（让用户看到每种方法的"输入 → 公式 → 输出"）
+    methodology_breakdown: list[ValuationMethodResult] = Field(
+        default_factory=list,
+        description="每种估值方法的具体推算（PE/PS/PEG/SOTP/...）",
+    )
+    key_assumptions: list[str] = Field(
+        default_factory=list,
+        description="估值依赖的 3-5 条关键假设（如:营收 CAGR 35%、毛利稳定 38%）",
+    )
 
 
 # --- 专业级新增：敏感性 / 对冲 / 退出 / kill switches / 详细 KPI ---
@@ -168,6 +303,15 @@ class ScenarioRow(BaseModel):
     valuation_hkd_b: float
     probability: float = Field(ge=0, le=1)
     expected_return_pct: float | None = Field(default=None, description="该情景下相对招股价回报率")
+    # 新增: 推理过程（让用户看到为什么是这个估值/概率）
+    valuation_derivation: str = Field(
+        default="",
+        description="估值推算路径，例：'毛利率从 38% 降至 30% → PS 压缩 25% → 80×0.75=60'",
+    )
+    probability_rationale: str = Field(
+        default="",
+        description="概率赋值依据，例：'近 3 月港股机器人 IPO 6 个月内破发率 30%'",
+    )
 
 
 class HedgingStrategy(BaseModel):
@@ -190,6 +334,15 @@ class KillSwitch(BaseModel):
     trigger: str
     action: str
     severity: Literal["高", "中", "低"] = "中"
+    # 新增: 阈值设定的依据
+    rationale: str = Field(
+        default="",
+        description="为什么这个阈值（行业基准/历史经验/风控保守度）",
+    )
+    historical_precedent: str = Field(
+        default="",
+        description="可选:相似案例（如:'2024 年 X 公司 CTO 离职 30 天股价跌 40%'）",
+    )
 
 
 class MonitoringKPI(BaseModel):
@@ -198,6 +351,32 @@ class MonitoringKPI(BaseModel):
     threshold: str = ""
     frequency: str = "季报"
     action_if_breach: str = ""
+    # 新增: KPI 阈值的设定依据 + 行业基准
+    threshold_rationale: str = Field(
+        default="",
+        description="为什么阈值是这个数（行业中位数/历史 1.5σ/招股书披露的承诺值）",
+    )
+    industry_benchmark: str = Field(
+        default="",
+        description="可选:行业基准对比（如：行业中位数 = 35%, 阈值 30% 留 5pp 缓冲）",
+    )
+
+
+class ReasoningStep(BaseModel):
+    """投决推理链的一步。
+
+    一份顶级 IC memo 的核心是"从假设到结论的论证流"，5-10 步链式展示让用户能 trace
+    每个量化结论的来源。
+    """
+    model_config = ConfigDict(extra="ignore")
+    step_no: int = 1  # 步骤序号
+    title: str  # 例: "估值起点：从可比公司 PS 中位数推出基准估值"
+    premise: str = ""  # 该步骤的前提条件
+    data_source: str = ""  # 数据出处 (引用 Agent 名 + 具体数字)
+    calculation: str = ""  # 计算 / 推算过程 (公式或文字)
+    conclusion: str = ""  # 该步骤的结论
+    confidence: Literal["高", "中", "低"] = "中"
+    caveats: list[str] = Field(default_factory=list, description="该步骤的潜在异议或假设依赖")
 
 
 class DecisionResult(BaseModel):
@@ -230,6 +409,18 @@ class DecisionResult(BaseModel):
     exit_plan: ExitPlan | None = None
     kill_switches: list[KillSwitch] = Field(default_factory=list)
     monitoring_kpis_detailed: list[MonitoringKPI] = Field(default_factory=list)
+
+    # 推理链 v3 新增（让用户看到每个量化结论的"为什么"）
+    key_assumptions: list[str] = Field(
+        default_factory=list,
+        description="本投决依赖的 5-10 条核心假设（如:营收 CAGR 35% / 毛利稳定 38% / "
+        "行业 PE 不发生系统性压缩）。如果其中任一被颠覆, 决议需重新评估。",
+    )
+    reasoning_chain: list[ReasoningStep] = Field(
+        default_factory=list,
+        description="5-10 步关键推理（前提→数据→计算→结论），让用户从最终建议 trace "
+        "回每个量化指标的来源",
+    )
 
 
 def _briefs_block(briefs: dict[str, str]) -> str:

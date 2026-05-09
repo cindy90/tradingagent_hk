@@ -231,6 +231,142 @@ details.brief-section .brief-body p { margin: 6px 0; }
 }
 .footer code { background: var(--base); padding: 2px 6px; border-radius: 3px; }
 
+/* Reasoning chain - 推理链专章 */
+.reasoning-chain { counter-reset: rstep; }
+.reasoning-step {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+  padding: 14px 18px;
+  margin: 10px 0;
+  position: relative;
+  counter-increment: rstep;
+}
+.reasoning-step::before {
+  content: counter(rstep);
+  position: absolute;
+  left: -16px;
+  top: 16px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  text-align: center;
+  line-height: 28px;
+  font-weight: 600;
+  font-size: 13px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+}
+.reasoning-step .rs-title { font-weight: 600; font-size: 15px; color: var(--accent); margin-bottom: 8px; }
+.reasoning-step .rs-grid {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 6px 12px;
+  font-size: 13px;
+}
+.reasoning-step .rs-grid .rs-label { color: var(--text-muted); font-weight: 500; }
+.reasoning-step .rs-conf {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: 8px;
+}
+.reasoning-step .rs-conf.conf-高 { background: var(--bull); color: var(--green); }
+.reasoning-step .rs-conf.conf-中 { background: var(--base); color: var(--text-muted); }
+.reasoning-step .rs-conf.conf-低 { background: var(--bear); color: var(--red); }
+.reasoning-step .rs-caveats {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: #fff7ed;
+  padding: 6px 10px;
+  border-radius: 4px;
+  margin-top: 8px;
+  border-left: 3px solid var(--orange);
+}
+
+/* 估值方法分拆 */
+.method-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 8px 0;
+}
+.method-card .method-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.method-card .method-name {
+  font-weight: 600;
+  color: var(--accent);
+  font-size: 14px;
+}
+.method-card .method-result {
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--text);
+}
+.method-card .method-weight {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--base);
+  padding: 2px 6px;
+  border-radius: 10px;
+  margin-left: 6px;
+}
+.method-card dl { margin: 6px 0 0 0; font-size: 12px; }
+.method-card dt { color: var(--text-muted); margin-top: 4px; }
+.method-card dd { margin: 1px 0 0 0; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+
+/* Hover 数字带 tooltip */
+.fig-with-rationale {
+  position: relative;
+  cursor: help;
+  border-bottom: 1px dotted var(--accent);
+}
+.fig-with-rationale:hover::after {
+  content: attr(data-rationale);
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  background: var(--text);
+  color: white;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  width: max-content;
+  max-width: 360px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  z-index: 100;
+  margin-bottom: 4px;
+  font-weight: normal;
+}
+
+/* 关键假设清单 */
+.assumption-list { padding: 0; margin: 8px 0; list-style: none; }
+.assumption-list li {
+  padding: 10px 14px 10px 38px;
+  background: #fefce8;
+  border: 1px solid #fef3c7;
+  border-radius: 6px;
+  margin: 6px 0;
+  font-size: 13px;
+  position: relative;
+}
+.assumption-list li::before {
+  content: "💡";
+  position: absolute;
+  left: 12px;
+  top: 10px;
+}
+
 /* Decision narrative section */
 .narrative {
   font-size: 14px;
@@ -324,9 +460,63 @@ details.brief-section .brief-body p { margin: 6px 0; }
   </div>
 </div>
 
+<!-- ===================== KEY ASSUMPTIONS ===================== -->
+{% if d.get('key_assumptions') %}
+<div class="card">
+  <h2>💡 关键假设清单（决议依赖的核心前提）</h2>
+  <p style="font-size: 12px; color: var(--text-muted); margin-top: 0;">
+    这些假设任一被颠覆, 决议需重新评估。可作为持续监控的"假设监控表"。
+  </p>
+  <ul class="assumption-list">
+    {% for a in d.get('key_assumptions', []) %}<li>{{ a }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<!-- ===================== VALUATION METHODOLOGY BREAKDOWN ===================== -->
+{% set vm = valuation.get('methodology_breakdown') %}
+{% if vm %}
+<div class="card">
+  <h2>📐 估值方法分拆（每种方法的输入 → 公式 → 输出）</h2>
+  <p style="font-size: 12px; color: var(--text-muted); margin-top: 0;">
+    估值锚定方法: <strong>{{ valuation.get('anchor_method', '—') }}</strong>
+    | 锚定逻辑: {{ valuation.get('anchor_logic', '—') }}
+  </p>
+  {% for m in vm %}
+  <div class="method-card">
+    <div class="method-head">
+      <div>
+        <span class="method-name">{{ m.get('method', '—') }}</span>
+        {% if m.get('weight') is not none %}
+          <span class="method-weight">权重 {{ (m.get('weight', 0) * 100) | round(0) | int }}%</span>
+        {% endif %}
+      </div>
+      <div class="method-result">
+        {% if m.get('result_hkd_b') is not none %}{{ m.get('result_hkd_b') }} 亿 HKD{% else %}—{% endif %}
+      </div>
+    </div>
+    <dl>
+      <dt>可比基准</dt><dd>{{ m.get('peer_basis', '—') }}</dd>
+      <dt>目标指标</dt><dd>{{ m.get('target_metric', '—') }}</dd>
+      <dt>计算公式</dt><dd>{{ m.get('formula', '—') }}</dd>
+    </dl>
+  </div>
+  {% endfor %}
+  {% if valuation.get('key_assumptions') %}
+  <h3>本估值依赖的关键假设</h3>
+  <ul class="assumption-list">
+    {% for a in valuation.get('key_assumptions', []) %}<li>{{ a }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endif %}
+
 <!-- ===================== SENSITIVITY ===================== -->
 <div class="card">
   <h2>📊 敏感性分析（三档情景）</h2>
+  <p style="font-size: 12px; color: var(--text-muted); margin-top: 0;">
+    💡 鼠标悬停"估值"和"概率"列可查看推算逻辑。
+  </p>
   {% if d.get('sensitivity_table') %}
   <table>
     <thead>
@@ -343,11 +533,23 @@ details.brief-section .brief-body p { margin: 6px 0; }
       <tr class="scenario-{{ s.get('name', '') }}">
         <td><strong>{{ s.get('name', '') }}</strong></td>
         <td>{{ s.get('triggers', []) | join('; ') }}</td>
-        <td>{{ s.get('valuation_hkd_b', '—') }}</td>
+        <td>
+          {% set vd = s.get('valuation_derivation', '') %}
+          {% if vd %}
+            <span class="fig-with-rationale" data-rationale="推算逻辑: {{ vd }}">
+              {{ s.get('valuation_hkd_b', '—') }}
+            </span>
+          {% else %}{{ s.get('valuation_hkd_b', '—') }}{% endif %}
+        </td>
         <td>
           {% set p = s.get('probability', 0) %}
+          {% set pr = s.get('probability_rationale', '') %}
           <span class="prob-bar"><span style="width: {{ (p * 100) | int }}%;"></span></span>
-          {{ (p * 100) | round(0) | int }}%
+          {% if pr %}
+            <span class="fig-with-rationale" data-rationale="赋值依据: {{ pr }}">
+              {{ (p * 100) | round(0) | int }}%
+            </span>
+          {% else %}{{ (p * 100) | round(0) | int }}%{% endif %}
         </td>
         <td>
           {% set r = s.get('expected_return_pct') %}
@@ -363,6 +565,38 @@ details.brief-section .brief-body p { margin: 6px 0; }
   </table>
   {% else %}<p style="color: var(--text-muted);">（敏感性分析缺失）</p>{% endif %}
 </div>
+
+<!-- ===================== REASONING CHAIN ===================== -->
+{% if d.get('reasoning_chain') %}
+<div class="card">
+  <h2>🧠 推理链（从假设到结论的完整论证流）</h2>
+  <p style="font-size: 12px; color: var(--text-muted); margin-top: 0;">
+    本份 IC memo 的核心交付物——把每个量化结论 trace 到具体推理步骤。
+  </p>
+  <div class="reasoning-chain" style="padding-left: 20px;">
+    {% for step in d.get('reasoning_chain', []) %}
+    <div class="reasoning-step">
+      <div class="rs-title">
+        {{ step.get('title', '—') }}
+        <span class="rs-conf conf-{{ step.get('confidence', '中') }}">{{ step.get('confidence', '中') }} 置信</span>
+      </div>
+      <div class="rs-grid">
+        {% if step.get('premise') %}<div class="rs-label">前提</div><div>{{ step.get('premise') }}</div>{% endif %}
+        {% if step.get('data_source') %}<div class="rs-label">数据来源</div><div>{{ step.get('data_source') }}</div>{% endif %}
+        {% if step.get('calculation') %}<div class="rs-label">计算</div><div style="font-family: ui-monospace, monospace; font-size: 13px;">{{ step.get('calculation') }}</div>{% endif %}
+        {% if step.get('conclusion') %}<div class="rs-label">结论</div><div><strong>{{ step.get('conclusion') }}</strong></div>{% endif %}
+      </div>
+      {% if step.get('caveats') %}
+        <div class="rs-caveats">
+          ⚠ <strong>异议/依赖:</strong>
+          {% for cv in step.get('caveats', []) %}<br>· {{ cv }}{% endfor %}
+        </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
 
 <!-- ===================== HEDGING + EXIT ===================== -->
 <div class="duo-grid">
@@ -421,6 +655,16 @@ details.brief-section .brief-body p { margin: 6px 0; }
           <span class="ks-severity">{{ ks.get('severity', '中') }}</span>
         </div>
         <div class="ks-action">→ {{ ks.get('action', '—') }}</div>
+        {% if ks.get('rationale') %}
+        <div style="font-size: 12px; color: var(--text-muted); margin-top: 6px; padding: 4px 0; border-top: 1px dashed var(--border);">
+          <strong>📖 阈值依据:</strong> {{ ks.get('rationale') }}
+        </div>
+        {% endif %}
+        {% if ks.get('historical_precedent') %}
+        <div style="font-size: 12px; color: var(--text-muted); font-style: italic;">
+          🕰 历史案例: {{ ks.get('historical_precedent') }}
+        </div>
+        {% endif %}
       </div>
     </div>
     {% endfor %}
@@ -432,14 +676,25 @@ details.brief-section .brief-body p { margin: 6px 0; }
   <h2>📈 监控 KPI</h2>
   {% if d.get('monitoring_kpis_detailed') %}
   <table>
-    <thead><tr><th>KPI</th><th>阈值</th><th>频率</th><th>违阈动作</th></tr></thead>
+    <thead><tr><th>KPI</th><th>阈值</th><th>频率</th><th>违阈动作</th><th>阈值依据</th></tr></thead>
     <tbody>
     {% for k in d.get('monitoring_kpis_detailed', []) %}
       <tr>
         <td><strong>{{ k.get('name', '—') }}</strong></td>
-        <td><code>{{ k.get('threshold', '—') }}</code></td>
+        <td>
+          {% set tr = k.get('threshold_rationale', '') %}
+          {% if tr %}
+            <span class="fig-with-rationale" data-rationale="{{ tr }}{% if k.get('industry_benchmark') %}{{ '\n行业基准: ' + k.get('industry_benchmark') }}{% endif %}">
+              <code>{{ k.get('threshold', '—') }}</code>
+            </span>
+          {% else %}<code>{{ k.get('threshold', '—') }}</code>{% endif %}
+        </td>
         <td>{{ k.get('frequency', '—') }}</td>
         <td style="color: var(--text-muted);">{{ k.get('action_if_breach', '—') }}</td>
+        <td style="font-size: 12px; color: var(--text-muted);">
+          {% if k.get('threshold_rationale') %}{{ k.get('threshold_rationale')[:80] }}{% if k.get('threshold_rationale', '')|length > 80 %}…{% endif %}
+          {% else %}—{% endif %}
+        </td>
       </tr>
     {% endfor %}
     </tbody>
