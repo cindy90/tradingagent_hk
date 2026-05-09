@@ -246,6 +246,298 @@ def _prefetch_ifind_sdk(
     }
 
 
+_METADATA_FILENAME = "_run_metadata.json"
+
+
+def save_run_metadata(reports_dir: Path, **kwargs: Any) -> None:
+    """把项目元数据写到 reports_dir/_run_metadata.json，供 rerun 复用。"""
+    import json
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    path = reports_dir / _METADATA_FILENAME
+    data = {k: v for k, v in kwargs.items() if v is not None}
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"_run_metadata.json 写入失败: {e}")
+
+
+def load_run_metadata(reports_dir: Path) -> dict[str, Any]:
+    import json
+    path = reports_dir / _METADATA_FILENAME
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"_run_metadata.json 读取失败: {e}")
+        return {}
+
+
+# Agent 名 → (实例化函数, 步骤序号, 是否需要 RAG, 是否需要 SDK peers 数据)
+_AGENT_REGISTRY: dict[str, tuple[int, bool, bool]] = {
+    "prospectus_analyst": (1, True, False),
+    "industry": (2, True, True),
+    "macro": (3, False, True),
+    "comparable": (4, True, True),
+    "tech_trend": (5, True, False),
+    "sentiment": (6, False, True),
+    "debate_manager": (7, False, False),
+    "risk": (8, False, False),
+    "decision": (9, False, False),
+}
+
+# 用户输入步骤名的别名（短形式 → 标准名）
+_STEP_ALIASES = {
+    "prospectus": "prospectus_analyst",
+    "debate": "debate_manager",
+    "all": None,  # 特殊值
+}
+
+
+def normalize_step_names(steps: str | list[str]) -> list[str]:
+    """把用户传的 steps 字符串解析成标准 agent name 列表，按执行顺序排好。"""
+    if isinstance(steps, str):
+        items = [s.strip() for s in steps.split(",") if s.strip()]
+    else:
+        items = list(steps)
+    if not items or "all" in items:
+        return sorted(_AGENT_REGISTRY.keys(), key=lambda n: _AGENT_REGISTRY[n][0])
+    out: list[str] = []
+    for s in items:
+        canonical = _STEP_ALIASES.get(s, s)
+        if canonical and canonical in _AGENT_REGISTRY and canonical not in out:
+            out.append(canonical)
+        elif canonical not in _AGENT_REGISTRY:
+            raise ValueError(
+                f"未知 step '{s}'。可选: {list(_AGENT_REGISTRY) + list(_STEP_ALIASES)}"
+            )
+    out.sort(key=lambda n: _AGENT_REGISTRY[n][0])
+    return out
+
+
+def rerun_steps(
+    project_id: str,
+    steps: str | list[str],
+    *,
+    llm: LLMClient | None = None,
+    ticker: str | None = None,
+    company_name: str | None = None,
+    industry: str | None = None,
+    peers: list[str] | None = None,
+    recent_ipos: list[str] | None = None,
+    ifind_target: str | None = None,
+    prospectus_pdf: str | Path | None = None,
+    debate_max_rounds: int | None = None,
+) -> AgentContext:
+    """重跑指定项目的某些 Agent 步骤，复用其他步骤已有的 brief。
+
+    元数据来源优先级（缺失字段才看下一级）：
+      函数显式参数 > reports_dir/_run_metadata.json > FeedbackStore predictions 表
+
+    需要 RAG 的步骤（prospectus_analyst/industry/comparable/tech_trend）：
+      复用 reports/<project_id> 对应的 ChromaDB collection。
+      若未持久（CaseRAG 重命名 / 误删），从 prospectus_pdf 重建。
+
+    需要 SDK 数据的步骤（industry/macro/comparable/sentiment）：
+      用 peers/recent_ipos/ifind_target 重新调 _prefetch_ifind_sdk。
+    """
+    s = get_settings()
+    reports_dir = s.reports_dir / project_id
+    if not reports_dir.exists():
+        raise FileNotFoundError(f"reports/{project_id}/ 不存在")
+
+    # 1. 元数据合并
+    metadata = load_run_metadata(reports_dir)
+    pred_meta: dict[str, Any] = {}
+    try:
+        from src.feedback import FeedbackStore
+        store = FeedbackStore()
+        try:
+            pred = store.get_prediction_by_project(project_id)
+            if pred:
+                pred_meta = {
+                    "ticker": pred.ticker,
+                    "company_name": pred.company_name,
+                    "industry": pred.industry,
+                }
+        finally:
+            store.close()
+    except Exception as e:
+        logger.debug(f"FeedbackStore 元数据读取跳过: {e}")
+
+    def _pick(key: str, *fallbacks: Any) -> Any:
+        for v in fallbacks:
+            if v not in (None, "", []):
+                return v
+        return None
+
+    ticker = _pick("ticker", ticker, metadata.get("ticker"), pred_meta.get("ticker"))
+    company_name = _pick("company_name", company_name, metadata.get("company_name"),
+                         pred_meta.get("company_name"))
+    industry = _pick("industry", industry, metadata.get("industry"),
+                     pred_meta.get("industry"))
+    peers = _pick("peers", peers, metadata.get("peers"))
+    recent_ipos = _pick("recent_ipos", recent_ipos, metadata.get("recent_ipos"))
+    ifind_target = _pick("ifind_target", ifind_target, metadata.get("ifind_target"))
+    prospectus_pdf = _pick("prospectus_pdf", prospectus_pdf, metadata.get("prospectus_pdf"))
+
+    if not all([ticker, company_name, industry]):
+        raise ValueError(
+            "缺少 ticker / company_name / industry —— "
+            "_run_metadata.json 不存在且 DB 无该 project，需要显式传参"
+        )
+
+    # 2. 解析 steps
+    step_list = normalize_step_names(steps)
+    if not step_list:
+        logger.warning("rerun: steps 为空，无事可做")
+        return AgentContext(  # type: ignore[call-arg]
+            project_id=project_id, ticker=ticker, company_name=company_name,
+            industry=industry, reports_dir=reports_dir,
+        )
+    needs_rag = any(_AGENT_REGISTRY[s][1] for s in step_list)
+    needs_sdk = any(_AGENT_REGISTRY[s][2] for s in step_list)
+
+    llm = llm or LLMClient()
+
+    # 3. 构 ctx：RAG 复用（按需），extras 重建（按需 SDK 拉）
+    rag: ProspectusRAG | None = None
+    cached_blocks: list[str] = []
+    if needs_rag:
+        rag = ProspectusRAG(project_id=project_id)
+        if not rag.is_indexed():
+            if not prospectus_pdf or not Path(prospectus_pdf).exists():
+                raise FileNotFoundError(
+                    f"步骤 {step_list} 需要 RAG，但 ChromaDB 未索引且未提供 --pdf 重建。"
+                )
+            logger.info(f"重建 RAG: {prospectus_pdf}")
+            chunks = ProspectusLoader(prospectus_pdf).load_chunks()
+            rag.index(chunks)
+            cached_blocks = ["\n\n---\n\n".join(select_cached_blocks(chunks))]
+        else:
+            logger.info(f"复用已有 RAG (chunks={rag._collection.count()})")  # type: ignore[union-attr]
+
+    wf_extras = WorkflowExtras()
+    if needs_sdk:
+        # 复用 _prefetch_ifind_sdk 拉 peers / recent_ipos / target 数据
+        if peers or recent_ipos:
+            try:
+                sdk_data = _prefetch_ifind_sdk(
+                    list(peers or []), list(recent_ipos) if recent_ipos else None,
+                    target_ticker=ifind_target or ticker,
+                    expected_target_name=company_name,
+                )
+                wf_extras.peers = sdk_data["peers"]
+                wf_extras.peer_recent_quotes = sdk_data["peer_recent_quotes"]
+                wf_extras.recent_hk_ipos = sdk_data["recent_hk_ipos"]
+                wf_extras.target_valuation = sdk_data.get("target_valuation")
+                tv = sdk_data.get("target_valuation") or {}
+                if tv.get("revenue"):
+                    wf_extras.target_revenue = float(tv["revenue"])
+                if tv.get("net_profit"):
+                    wf_extras.target_net_profit = float(tv["net_profit"])
+            except Exception as e:
+                logger.warning(f"SDK prefetch 失败（继续，部分字段缺失）: {e}")
+        # 宏观也通过 _prefetch_ths 拉 EDB
+        try:
+            ths_data = CornerstoneWorkflow._prefetch_ths(ticker, industry)
+            for k, v in ths_data.items():
+                wf_extras.set(k, v)
+        except Exception as e:
+            logger.warning(f"_prefetch_ths 失败（继续）: {e}")
+
+    ctx = AgentContext(
+        project_id=project_id,
+        ticker=ticker,
+        company_name=company_name,
+        industry=industry,
+        reports_dir=reports_dir,
+        rag=rag,
+        cached_blocks=cached_blocks,
+        extras=wf_extras,
+    )
+
+    # 4. 加载已有 brief（不在重跑列表里的）
+    import re as _re
+    brief_pat = _re.compile(r"^(\d{2})_(.+)\.brief\.md$")
+    for f in sorted(reports_dir.iterdir()):
+        m = brief_pat.match(f.name)
+        if not m:
+            continue
+        agent_name = m.group(2)
+        if agent_name in step_list:
+            continue
+        ctx.briefs[agent_name] = f.read_text(encoding="utf-8")
+    logger.info(
+        f"rerun: 加载 {len(ctx.briefs)} 个已有 brief, "
+        f"将重跑 {step_list}"
+    )
+
+    # 5. 实例化要跑的 agents (按步序号排)
+    summarizer = Summarizer(llm)
+    rounds_for_debate = (
+        debate_max_rounds if debate_max_rounds is not None else get_settings().debate_max_rounds
+    )
+
+    def _instantiate(name: str) -> BaseAgent:
+        from src.agents.bear import BearResearcher  # noqa: F401
+        from src.agents.bull import BullResearcher  # noqa: F401
+        klass_map = {
+            "prospectus_analyst": ProspectusAnalystAgent,
+            "industry": IndustryAgent,
+            "macro": MacroAgent,
+            "comparable": ComparableAgent,
+            "tech_trend": TechTrendAgent,
+            "sentiment": SentimentAgent,
+            "risk": RiskAgent,
+            "decision": DecisionAgent,
+        }
+        if name == "debate_manager":
+            return DebateOrchestrator(llm, max_rounds=rounds_for_debate)
+        klass = klass_map[name]
+        if name == "decision":
+            return klass(llm)
+        return klass(llm, summarizer)
+
+    # 6. 跑各步骤
+    for step_name in step_list:
+        step_no = _AGENT_REGISTRY[step_name][0]
+        agent = _instantiate(step_name)
+        logger.info(f"--- rerun 步骤 {step_no}: {step_name} ---")
+        report = agent.run(ctx)
+        agent._save_full_report(ctx, step_no, report.full_report)
+        (reports_dir / f"{step_no:02d}_{agent.name}.brief.md").write_text(
+            report.brief, encoding="utf-8"
+        )
+
+    # 7. token 账本（独立文件，不覆盖原版）
+    rerun_tag = "_".join(step_list)[:60]
+    from src.llm.pricing import estimate_total_cost_cny
+    from src.llm.router import ModelTier as _MT, resolve_model
+    tier_to_model = {t.value: resolve_model(t) for t in _MT}
+    cost = estimate_total_cost_cny(llm.ledger.by_tier, tier_to_model)
+    (reports_dir / f"_token_usage_rerun_{rerun_tag}.md").write_text(
+        f"# Token 账本（rerun: {step_list}）\n\n"
+        + llm.ledger.summary()
+        + f"\n\n**预估成本: ¥{cost}**\n",
+        encoding="utf-8",
+    )
+
+    # 8. 决议被 rerun 时，更新 prediction（upsert）+ 重写 FINAL_MEMO
+    if "decision" in step_list:
+        try:
+            persist_prediction(ctx, llm)
+        except Exception as e:
+            logger.warning(f"prediction 落库失败: {e}")
+        try:
+            from src.reports.writer import write_final_summary
+            write_final_summary(ctx)
+        except Exception as e:
+            logger.warning(f"FINAL_MEMO 重写失败: {e}")
+
+    return ctx
+
+
 def persist_prediction(ctx: AgentContext, llm: LLMClient) -> int | None:
     """把 ctx 里的决议结果落到 feedback DB，返回 prediction id。
 
@@ -454,6 +746,18 @@ class CornerstoneWorkflow:
                 peers = peer_confirm_callback(candidates) or None
             except Exception as e:
                 logger.warning(f"[PeerSuggester] 失败, 跳过交互确认: {e}")
+
+        # 把项目元数据落盘，供 rerun 命令复用（避免再让用户输 ticker/name/peers）
+        save_run_metadata(
+            ctx.reports_dir,
+            ticker=ticker,
+            company_name=company_name,
+            industry=industry,
+            prospectus_pdf=str(prospectus_pdf) if prospectus_pdf else None,
+            peers=list(peers) if peers else None,
+            recent_ipos=list(recent_ipos) if recent_ipos else None,
+            ifind_target=ifind_target,
+        )
 
         # 4. 用确认后的 peers + recent_ipos 拉 SDK 数据, setattr 到 ctx.extras
         # ifind_target 优先级: 显式传入 > project ticker(2670). 校验公司名防止代码污染。

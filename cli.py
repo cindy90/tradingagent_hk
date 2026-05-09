@@ -22,6 +22,7 @@ from src.data.hkex_client import download_document
 from src.data.ths_client import THSClient
 from src.feedback import CaseRAG, FeedbackStore, Outcome, PostmortemAgent, reindex_all_cases
 from src.graph import CornerstoneWorkflow
+from src.graph.workflow import rerun_steps
 from src.reports import write_final_summary
 
 app = typer.Typer(add_completion=False, help="港股 IPO 基石投资分析工具")
@@ -117,6 +118,14 @@ def analyze(
     if recent_ipos:
         recent_ipos_list = [p.strip() for p in recent_ipos.split(",") if p.strip()]
         console.print(f"[cyan]近期 IPO 队列: {recent_ipos_list}[/cyan]")
+    elif peer_list:
+        # peer 同时被 sentiment 当成"近期同行业 IPO"样本; 业务上这两组应不同。
+        # peers = 估值最像的(可能 5 年前上市); recent_ipos = 近 6 月新上市的(反映打新情绪)
+        console.print(
+            "[yellow]⚠ 未传 --recent-ipos，sentiment 第三节将 fallback 到 --peers 同一组。"
+            "建议另传一组近 6 月港股新股代码以反映真实打新情绪 (例: "
+            "--recent-ipos 09080,06699,09660)。[/yellow]"
+        )
 
     callback = None if (peer_list or no_confirm_peers) else _interactive_peer_confirm
 
@@ -374,6 +383,119 @@ def similar(
                       f"/ D180 {md.get('d180_return', 0) * 100:.1f}%")
         console.print(f"  距离: {h.get('distance')}")
         console.print(f"  ─── 摘要 ───\n{h['text'][:600]}\n")
+
+
+@app.command()
+def rerun(
+    project_id: str = typer.Option(..., "--project-id", "-p", help="reports/<project_id>/ 必须存在"),
+    steps: str = typer.Option(
+        "decision",
+        "--steps",
+        "-s",
+        help="逗号分隔的 agent 名: prospectus / industry / macro / comparable / "
+        "tech_trend / sentiment / debate / risk / decision；'all' 重跑全部。",
+    ),
+    ticker: str | None = typer.Option(None, "--ticker", "-t",
+                                      help="未传时优先读 _run_metadata.json，再读 DB"),
+    name: str | None = typer.Option(None, "--name", "-n"),
+    industry: str | None = typer.Option(None, "--industry", "-i"),
+    pdf: Path | None = typer.Option(None, "--pdf", help="RAG 重建用（chroma 已索引时可省）"),
+    peers: str | None = typer.Option(None, "--peers"),
+    recent_ipos: str | None = typer.Option(None, "--recent-ipos"),
+    ifind_target: str | None = typer.Option(None, "--ifind-target"),
+    debate_rounds: int | None = typer.Option(None, "--debate-rounds"),
+) -> None:
+    """重跑指定项目的某些 Agent 步骤，复用其他步骤已有的 brief。
+
+    最常用：决议步骤超时或想换 prompt 重生成
+        ta-hk rerun -p 02670_20260509_104530 -s decision
+
+    重跑多步：
+        ta-hk rerun -p ... -s comparable,decision
+
+    全量重跑（少用，相当于 analyze）：
+        ta-hk rerun -p ... -s all
+    """
+    _setup_logging()
+    s = get_settings()
+    provider = (s.llm_provider or "anthropic").lower()
+    key_map = {"anthropic": s.anthropic_api_key, "kimi": s.kimi_api_key, "deepseek": s.deepseek_api_key}
+    if not key_map.get(provider):
+        console.print(f"[red]LLM_PROVIDER={provider} 但对应 API Key 未配置[/red]")
+        raise typer.Exit(code=1)
+
+    peer_list = [p.strip() for p in peers.split(",") if p.strip()] if peers else None
+    recent_ipos_list = [p.strip() for p in recent_ipos.split(",") if p.strip()] if recent_ipos else None
+
+    try:
+        ctx = rerun_steps(
+            project_id=project_id,
+            steps=steps,
+            ticker=ticker,
+            company_name=name,
+            industry=industry,
+            peers=peer_list,
+            recent_ipos=recent_ipos_list,
+            ifind_target=ifind_target,
+            prospectus_pdf=pdf,
+            debate_max_rounds=debate_rounds,
+        )
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=2)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=2)
+
+    console.print(f"\n[green]✓ rerun 完成[/green]")
+    console.print(f"  报告目录: {ctx.reports_dir}")
+    if ctx.extras.decision_json:
+        console.print("\n[bold]核心决议:[/bold]")
+        console.print(ctx.extras.decision_json)
+
+
+@app.command("suggest-peers")
+def suggest_peers_cmd(
+    project_id: str = typer.Option(..., "--project-id", "-p"),
+    name: str | None = typer.Option(None, "--name"),
+    industry: str | None = typer.Option(None, "--industry"),
+) -> None:
+    """对已有 reports/<project_id>/ 项目跑 PeerSuggester（不跑 9 个 agent）。
+
+    用于：调试 RAG 召回质量 / 验证 LLM 提取效果，不浪费整次分析的 token。
+    """
+    _setup_logging()
+    from src.agents.peer_suggester import suggest_peers
+    from src.data.rag import ProspectusRAG
+    from src.graph.workflow import load_run_metadata
+    from src.llm import LLMClient
+
+    s = get_settings()
+    reports_dir = s.reports_dir / project_id
+    md = load_run_metadata(reports_dir)
+    name = name or md.get("company_name")
+    industry = industry or md.get("industry")
+    if not name or not industry:
+        console.print("[red]缺 --name / --industry（_run_metadata.json 也无）[/red]")
+        raise typer.Exit(code=2)
+
+    rag = ProspectusRAG(project_id=project_id)
+    if not rag.is_indexed():
+        console.print(f"[red]RAG project_id={project_id} 未索引[/red]")
+        raise typer.Exit(code=2)
+
+    candidates = suggest_peers(rag, name, industry, LLMClient())
+    if not candidates:
+        console.print("[yellow]LLM 未返回候选 peers[/yellow]")
+        return
+    from rich.table import Table
+    t = Table(title=f"{name} 的 LLM 候选 peers")
+    t.add_column("代码", style="green")
+    t.add_column("简称")
+    t.add_column("理由")
+    for c in candidates:
+        t.add_row(c.ticker, c.name, c.reason)
+    console.print(t)
 
 
 @app.command("reindex-cases")
