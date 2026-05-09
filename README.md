@@ -254,26 +254,30 @@ python cli.py show-config
 
 ### 案例：珞石机器人（Loctek Robotics）测试流程
 
+招股书 URL（HKEX 公开链接，无需 THS）:
+`https://www1.hkexnews.hk/app/sehk/2026/108386/documents/sehk26033103931_c.pdf`
+
 ```bash
-# 1. 配置 Kimi 和 同花顺
-cat >> .env <<EOF
+# 1. 配置 Kimi（最便宜的起步方案）
+cat >> .env <<'EOF'
 LLM_PROVIDER=kimi
 KIMI_API_KEY=sk-你的key
-THS_REFRESH_TOKEN=你的refresh_token
+EMBEDDING_MODEL=BAAI/bge-base-zh-v1.5
 EOF
 
-# 2. 执行（招股书会通过 THS 自动拉）
+# 2. 直接用 --pdf-url 触发下载并跑完整流程
 python cli.py analyze \
-    --ticker <珞石港股代码> \
-    --name "珞石（北京）科技有限公司" \
-    --industry "工业机器人/协作机器人"
+    --ticker 02670 \
+    --name "珞石（山东）智能科技股份有限公司" \
+    --industry "工业机器人/协作机器人" \
+    --pdf-url "https://www1.hkexnews.hk/app/sehk/2026/108386/documents/sehk26033103931_c.pdf"
 
-# 若 THS 暂未收录可手动放 PDF：
-# 把招股书丢到 data/prospectus/<ticker>.pdf 即可
-
-# 3. 看 token 消耗
-cat reports/<project_id>/_token_usage.md
+# 3. 看 token 消耗与最终决议
+cat reports/02670_*/FINAL_MEMO.md
+cat reports/02670_*/_token_usage.md
 ```
+
+> 实际港股代码请以最终上市代码为准，--ticker 仅用于文件命名和 THS 查询。
 
 **预估 token 消耗（Kimi 全家桶）：**
 - 单次完整跑通约 30-50 万 token（含 RAG 检索 + 8 Agent + 2 轮辩论 + 风控 + 决策）

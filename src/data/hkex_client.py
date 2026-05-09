@@ -31,11 +31,13 @@ def search_listing_documents(company_keyword: str) -> list[dict[str, Any]]:
 def download_document(url: str, dest_path: str) -> bool:
     """下载披露易上的 PDF 文件到本地。"""
     try:
-        with httpx.Client(timeout=60, follow_redirects=True) as c:
+        with httpx.Client(timeout=120, follow_redirects=True) as c:
             r = c.get(url)
             r.raise_for_status()
             with open(dest_path, "wb") as f:
                 f.write(r.content)
+        size_mb = len(r.content) / 1024 / 1024
+        logger.info(f"下载完成: {dest_path} ({size_mb:.1f} MB)")
         return True
     except Exception as e:
         logger.warning(f"download_document failed: {e}")

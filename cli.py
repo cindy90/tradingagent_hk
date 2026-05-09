@@ -17,6 +17,7 @@ from loguru import logger
 from rich.console import Console
 
 from config import get_settings
+from src.data.hkex_client import download_document
 from src.data.ths_client import THSClient
 from src.graph import CornerstoneWorkflow
 from src.reports import write_final_summary
@@ -36,7 +37,8 @@ def analyze(
     ticker: str = typer.Option(..., "--ticker", "-t", help="港股代码，5 位数字，例如 09999"),
     name: str = typer.Option(..., "--name", "-n", help="公司中文名"),
     industry: str = typer.Option(..., "--industry", "-i", help="所属行业关键字"),
-    pdf: Path | None = typer.Option(None, "--pdf", "-p", help="本地招股书 PDF 路径（不传则自动尝试本地缓存或同花顺）"),
+    pdf: Path | None = typer.Option(None, "--pdf", "-p", help="本地招股书 PDF 路径"),
+    pdf_url: str | None = typer.Option(None, "--pdf-url", help="招股书 PDF 公开 URL（如 HKEX 链接），自动下载到本地"),
     debate_rounds: int | None = typer.Option(None, "--debate-rounds", help="辩论最大轮数"),
     no_prospectus: bool = typer.Option(False, "--no-prospectus", help="跳过招股书"),
     no_auto_fetch: bool = typer.Option(False, "--no-auto-fetch", help="禁用同花顺自动拉取招股书"),
@@ -53,7 +55,16 @@ def analyze(
 
     pdf_arg: Path | None = None
     if not no_prospectus:
+        # 优先级: --pdf > --pdf-url > 本地缓存 > 同花顺自动拉取
         pdf_arg = pdf or _try_default_pdf(ticker)
+        if pdf_arg is None and pdf_url:
+            local = s.prospectus_dir / f"{ticker}.pdf"
+            console.print(f"[cyan]从 URL 下载招股书: {pdf_url}[/cyan]")
+            if download_document(pdf_url, str(local)):
+                pdf_arg = local
+                console.print(f"[green]✓ 已下载: {pdf_arg}[/green]")
+            else:
+                console.print("[yellow]URL 下载失败，将尝试同花顺[/yellow]")
         if pdf_arg is None and not no_auto_fetch:
             ths = THSClient()
             if ths.configured:
