@@ -96,6 +96,67 @@ def _render_exit_plan(e) -> str:
     )
 
 
+def _render_decision_weights(
+    factors: list,
+    total: float | None,
+    mapping_text: str,
+) -> str:
+    """渲染决策因子加权打分卡为 markdown 表格 + 加权总分行 + 映射说明."""
+    if not factors:
+        return "_（决策因子打分卡缺失；建议跑 rerun 触发 Decision Agent 重输出）_"
+
+    def _get(item, key, default=None):
+        if isinstance(item, dict):
+            return item.get(key, default)
+        return getattr(item, key, default)
+
+    lines = [
+        "| 因子 | 权重 | 得分 | 贡献 | 数据源 | 权重 + 得分理由 |",
+        "|---|---|---|---|---|---|",
+    ]
+    weight_sum = 0.0
+    contribution_sum = 0.0
+    for f in factors:
+        w = float(_get(f, "weight", 0) or 0)
+        s = float(_get(f, "score", 0) or 0)
+        c = _get(f, "contribution")
+        if c is None or float(c) == 0.0:
+            c = round(w * s, 3)
+        weight_sum += w
+        contribution_sum += float(c)
+        sources = _get(f, "source_agents", []) or []
+        sources_str = ", ".join(sources) if isinstance(sources, list) else str(sources)
+        rationale = (_get(f, "rationale", "") or "—")[:200]
+        lines.append(
+            f"| **{_get(f, 'factor', '—')}** | {w * 100:.0f}% | {s:.1f} | "
+            f"**{float(c):.2f}** | {sources_str} | {rationale} |"
+        )
+
+    # 加权总分行: total 缺失时 fallback 用 contribution 累加值
+    if total is None:
+        total = round(contribution_sum, 2)
+    if not mapping_text:
+        # 也 fallback 渲染映射文字
+        try:
+            from src.agents.decision import format_score_mapping
+            mapping_text = format_score_mapping(total)
+        except Exception:
+            mapping_text = f"{total:.2f} → 见映射区间"
+
+    total_str = f"**{total:.2f}**"
+    weight_pct = f"{weight_sum * 100:.0f}%"
+    weight_warn = "" if 0.92 <= weight_sum <= 1.08 else " ⚠ 偏离 1.0"
+    lines.append(
+        f"| **加权总分** | {weight_pct}{weight_warn} | — | {total_str} | "
+        f"{mapping_text} | — |"
+    )
+    lines.append("")
+    lines.append(
+        f"**映射区间**: ≥4.0 认购 · 3.0-4.0 审慎参与 · 2.0-3.0 观望 · <2.0 不认购"
+    )
+    return "\n".join(lines)
+
+
 def _render_monitoring_kpis(detailed: list, fallback: list) -> str:
     if detailed:
         lines = ["| KPI | 阈值 | 频率 | 违阈动作 |", "|---|---|---|---|"]
@@ -141,6 +202,13 @@ def write_final_summary(ctx: AgentContext, *, also_html: bool = True) -> Path:
         d.get("monitoring_kpis") or [],
     )
 
+    # 决策因子加权打分卡 (v4)
+    weights_md = _render_decision_weights(
+        d.get("decision_weights") or [],
+        d.get("weighted_total_score"),
+        d.get("weighted_to_recommendation_mapping", ""),
+    )
+
     # 关键支持 / 风险 / 条件
     supports_md = _render_list(d.get("key_supports") or [])
     risks_md = _render_list(d.get("key_risks") or [])
@@ -175,35 +243,39 @@ def write_final_summary(ctx: AgentContext, *, also_html: bool = True) -> Path:
 
 {sensitivity_md}
 
-## IV.A 对冲策略
+## IV. 决策因子加权打分
+
+{weights_md}
+
+## V.A 对冲策略
 
 {hedging_md}
 
-## IV.B 退出策略
+## V.B 退出策略
 
 {exit_md}
 
-## V. Kill Switches（认购后退出触发）
+## VI. Kill Switches（认购后退出触发）
 
 {kill_md}
 
-## VI. 监控 KPI
+## VII. 监控 KPI
 
 {monitor_md}
 
-## VII. 硬性认购条件 (Deal Conditions)
+## VIII. 硬性认购条件 (Deal Conditions)
 
 {conditions_md}
 
 ---
 
-## VIII. 决议全文
+## IX. 决议全文
 
 {ctx.full_reports.get("decision", "（决策报告缺失）")}
 
 ---
 
-## IX. 各环节简报合集
+## X. 各环节简报合集
 
 {brief_section}
 

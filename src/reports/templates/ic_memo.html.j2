@@ -259,6 +259,66 @@ table.kill-switches td.severity.severity-低 { color: var(--yellow); }
   font-style: italic;
 }
 
+/* 决策因子加权打分 */
+table.factor-weights {
+  font-size: 12.5px;
+}
+table.factor-weights td.f-name { font-weight: 600; color: var(--accent); width: 130px; }
+table.factor-weights td.f-weight { width: 60px; text-align: right; font-family: ui-monospace, monospace; }
+table.factor-weights td.f-score  { width: 60px; text-align: right; font-family: ui-monospace, monospace; }
+table.factor-weights td.f-contrib {
+  width: 140px;
+  font-family: ui-monospace, monospace;
+}
+table.factor-weights td.f-contrib .bar {
+  display: inline-block;
+  width: 70px;
+  height: 7px;
+  background: var(--border-light);
+  border-radius: 1px;
+  vertical-align: middle;
+  margin-right: 6px;
+  overflow: hidden;
+}
+table.factor-weights td.f-contrib .bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+table.factor-weights td.f-rationale {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+table.factor-weights tr.weighted-total td {
+  border-top: 2px solid var(--text);
+  font-weight: 600;
+  background: var(--accent-light);
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+table.factor-weights tr.weighted-total td.f-contrib {
+  font-size: 14px;
+}
+.weight-warn {
+  color: var(--orange);
+  font-size: 11px;
+  font-weight: 500;
+  margin-left: 4px;
+}
+.mapping-legend {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin: 6px 0 0;
+  font-family: -apple-system, sans-serif;
+}
+.mapping-legend code {
+  background: var(--neutral-bg);
+  padding: 1px 6px;
+  border-radius: 2px;
+  font-size: 11px;
+  margin: 0 2px;
+}
+
 /* 估值方法分拆 */
 .method-row {
   display: grid;
@@ -564,10 +624,84 @@ footer code { background: var(--neutral-bg); padding: 1px 4px; border-radius: 2p
   {% else %}<p class="muted">（敏感性分析缺失）</p>{% endif %}
 </section>
 
-<!-- VI. REASONING CHAIN -->
+<!-- VI. DECISION WEIGHTS — 决策因子加权打分卡 -->
+{% if d.get('decision_weights') %}
+<section class="chapter">
+  <h2>VI. 决策因子加权打分</h2>
+  {% set total = d.get('weighted_total_score') %}
+  {% set mapping = d.get('weighted_to_recommendation_mapping') %}
+  {% set factors = d.get('decision_weights', []) %}
+  {% set weight_sum = factors | sum(attribute='weight') if factors and factors[0] is mapping else 0 %}
+  {# pydantic dump 后 list[dict], 用 namespace 兼容 #}
+  {% set ns = namespace(wsum=0.0) %}
+  {% for f in factors %}{% set ns.wsum = ns.wsum + (f.get('weight', 0) | float) %}{% endfor %}
+  <p class="mapping-legend">
+    映射区间:
+    <code>≥4.0 认购</code>
+    <code>3.0-4.0 审慎参与</code>
+    <code>2.0-3.0 观望</code>
+    <code>&lt;2.0 不认购</code>
+  </p>
+  <table class="data factor-weights">
+    <thead>
+      <tr>
+        <th>因子</th>
+        <th style="width: 60px; text-align: right;">权重</th>
+        <th style="width: 60px; text-align: right;">得分</th>
+        <th style="width: 140px;">贡献 (权重×得分)</th>
+        <th>权重 + 得分理由</th>
+        <th style="width: 130px;">数据源</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for f in factors %}
+      {% set w = f.get('weight', 0) | float %}
+      {% set s = f.get('score', 0) | float %}
+      {% set c = f.get('contribution', 0) | float %}
+      {% if c == 0 and (w * s) != 0 %}{% set c = w * s %}{% endif %}
+      <tr>
+        <td class="f-name">{{ f.get('factor', '—') }}</td>
+        <td class="f-weight">{{ (w * 100) | round(0) | int }}%</td>
+        <td class="f-score">{{ '%.1f'|format(s) }}</td>
+        <td class="f-contrib">
+          <span class="bar"><span style="width: {{ (c / 5 * 100) | round(0) | int }}%;"></span></span>
+          <strong>{{ '%.2f'|format(c) }}</strong>
+        </td>
+        <td class="f-rationale">{{ f.get('rationale', '—') }}</td>
+        <td class="muted" style="font-size: 11.5px;">
+          {{ (f.get('source_agents', []) | join(', ')) or '—' }}
+        </td>
+      </tr>
+    {% endfor %}
+      <tr class="weighted-total">
+        <td>加权总分</td>
+        <td class="f-weight">
+          {{ (ns.wsum * 100) | round(0) | int }}%
+          {% if ns.wsum < 0.92 or ns.wsum > 1.08 %}
+            <span class="weight-warn">⚠ 偏离 1.0</span>
+          {% endif %}
+        </td>
+        <td class="f-score">—</td>
+        <td class="f-contrib">
+          {% if total is not none %}
+            <span class="bar"><span style="width: {{ (total / 5 * 100) | round(0) | int }}%; background: var(--text);"></span></span>
+            <strong style="font-size: 14px;">{{ '%.2f'|format(total) }}</strong>
+            <span class="muted" style="font-size: 11.5px;"> / 5.0</span>
+          {% else %}—{% endif %}
+        </td>
+        <td colspan="2" class="muted">
+          {{ mapping or '—' }}
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<!-- VII. REASONING CHAIN -->
 {% if d.get('reasoning_chain') %}
 <section class="chapter">
-  <h2>VI. 推理链（论证流溯源）</h2>
+  <h2>VII. 推理链（论证流溯源）</h2>
   <p class="note">
     把"从 Agent 简报推到最终建议"的链条显式化, 让每个量化结论可 trace 到具体推理步骤。
   </p>
@@ -598,7 +732,7 @@ footer code { background: var(--neutral-bg); padding: 1px 4px; border-radius: 2p
 <section class="chapter">
   <div class="two-col">
     <div>
-      <h2>VII.A 对冲策略</h2>
+      <h2>VIII.A 对冲策略</h2>
       {% if hedging %}
       <table class="exec-table">
         <tr><th>工具</th><td>{{ hedging.get('instrument', '—') }}</td></tr>
@@ -611,7 +745,7 @@ footer code { background: var(--neutral-bg); padding: 1px 4px; border-radius: 2p
       {% else %}<p class="muted">（未提供对冲策略）</p>{% endif %}
     </div>
     <div>
-      <h2>VII.B 退出策略</h2>
+      <h2>VIII.B 退出策略</h2>
       {% if exit_plan %}
       <table class="exec-table">
         <tr><th>退出时点</th><td>{{ exit_plan.get('horizon', '—') }}</td></tr>
@@ -630,7 +764,7 @@ footer code { background: var(--neutral-bg); padding: 1px 4px; border-radius: 2p
 
 <!-- VIII. KILL SWITCHES -->
 <section class="chapter">
-  <h2>VIII. Kill Switches（认购后退出触发）</h2>
+  <h2>IX. Kill Switches（认购后退出触发）</h2>
   {% if d.get('kill_switches') %}
   <table class="data kill-switches">
     <thead>
@@ -662,7 +796,7 @@ footer code { background: var(--neutral-bg); padding: 1px 4px; border-radius: 2p
 
 <!-- IX. MONITORING KPIs -->
 <section class="chapter">
-  <h2>IX. 监控 KPI</h2>
+  <h2>X. 监控 KPI</h2>
   {% if d.get('monitoring_kpis_detailed') %}
   <table class="data">
     <thead>
@@ -696,7 +830,7 @@ footer code { background: var(--neutral-bg); padding: 1px 4px; border-radius: 2p
 <!-- X. DEAL CONDITIONS -->
 {% if d.get('deal_conditions') %}
 <section class="chapter">
-  <h2>X. 硬性认购条件</h2>
+  <h2>XI. 硬性认购条件</h2>
   <ul class="tight">
     {% for c in d.get('deal_conditions', []) %}<li>{{ c }}</li>{% endfor %}
   </ul>
@@ -705,13 +839,13 @@ footer code { background: var(--neutral-bg); padding: 1px 4px; border-radius: 2p
 
 <!-- XI. DECISION NARRATIVE -->
 <section class="chapter">
-  <h2>XI. 决议全文</h2>
+  <h2>XII. 决议全文</h2>
   <div class="narrative">{{ decision_html | safe }}</div>
 </section>
 
 <!-- XII. AGENT BRIEFS -->
 <section class="chapter">
-  <h2>XII. 各环节简报合集</h2>
+  <h2>XIII. 各环节简报合集</h2>
   <p class="note">默认折叠, 点击章节展开。</p>
   {% for name, brief_html in briefs %}
   <details class="brief">

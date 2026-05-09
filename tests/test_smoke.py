@@ -1906,3 +1906,228 @@ def test_html_renders_reasoning_chain_and_assumptions(tmp_path) -> None:
     assert "行业中位 35%" in text  # KPI rationale
     # 假设清单
     assert "假设 1: 营收增速保持 35%" in text
+
+
+# ============================================================================
+# v4 决策因子加权打分卡测试
+# ============================================================================
+
+def test_factor_weight_auto_computes_contribution() -> None:
+    """contribution 缺失时由 model_validator 自动算 weight × score."""
+    from src.agents.decision import FactorWeight
+
+    # 不传 contribution → 自动算
+    f = FactorWeight(factor="业务质量", weight=0.20, score=4.0, rationale="x")
+    assert f.contribution == 0.8
+
+    # 显式传 contribution → 保留
+    f2 = FactorWeight(factor="x", weight=0.30, score=3.0, contribution=1.5, rationale="x")
+    assert f2.contribution == 1.5
+
+    # 传异常大值 (>5) → 视为错误, 自动重算
+    f3 = FactorWeight(factor="x", weight=0.20, score=4.0, contribution=99.0, rationale="x")
+    assert f3.contribution == 0.8
+
+
+def test_score_to_recommendation_mapping() -> None:
+    from src.agents.decision import map_score_to_recommendation, format_score_mapping
+
+    assert map_score_to_recommendation(4.5) == "认购"
+    assert map_score_to_recommendation(4.0) == "认购"  # 4.0 边界
+    assert map_score_to_recommendation(3.99) == "审慎参与"
+    assert map_score_to_recommendation(3.5) == "审慎参与"
+    assert map_score_to_recommendation(2.99) == "观望"
+    assert map_score_to_recommendation(2.0) == "观望"
+    assert map_score_to_recommendation(1.99) == "不认购"
+    assert map_score_to_recommendation(0.0) == "不认购"
+
+    text = format_score_mapping(3.50)
+    assert "3.50" in text
+    assert "审慎参与" in text
+    assert "3.0" in text and "4.0" in text
+
+
+def test_decision_v4_with_factor_weights_auto_computes_total() -> None:
+    """v4 schema: decision_weights 完整 → weighted_total_score 自动算."""
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "审慎参与",
+        "confidence": "中",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {"mid": 80.0, "anchor_method": "PE", "anchor_logic": "x"},
+        "ipo_pricing_view": "合理",
+        "key_supports": ["x"],
+        "key_risks": ["y"],
+        "decision_weights": [
+            {"factor": "业务质量", "weight": 0.20, "score": 4.0,
+             "source_agents": ["prospectus_analyst"], "rationale": "..."},
+            {"factor": "估值合理性", "weight": 0.30, "score": 3.0,
+             "source_agents": ["comparable"], "rationale": "..."},
+            {"factor": "风控等级", "weight": 0.25, "score": 3.5,
+             "source_agents": ["risk"], "rationale": "..."},
+            {"factor": "宏观窗口", "weight": 0.10, "score": 4.0,
+             "source_agents": ["macro"], "rationale": "..."},
+            {"factor": "辩论倾向", "weight": 0.10, "score": 3.5,
+             "source_agents": ["debate_manager"], "rationale": "..."},
+            {"factor": "情绪", "weight": 0.05, "score": 3.5,
+             "source_agents": ["sentiment"], "rationale": "..."},
+        ],
+    }
+    result, err = validate_decision(parsed)
+    assert result is not None, f"v4 校验失败: {err}"
+    # 加权总分 = 0.20*4.0 + 0.30*3.0 + 0.25*3.5 + 0.10*4.0 + 0.10*3.5 + 0.05*3.5
+    #         = 0.80 + 0.90 + 0.875 + 0.40 + 0.35 + 0.175 = 3.50
+    assert abs(result.weighted_total_score - 3.50) < 0.01, result.weighted_total_score
+    # 映射文本自动生成
+    assert "审慎参与" in result.weighted_to_recommendation_mapping
+    assert "3.50" in result.weighted_to_recommendation_mapping
+    # 各 factor 的 contribution 都被算
+    assert all(f.contribution > 0 for f in result.decision_weights)
+
+
+def test_decision_v4_weight_sum_warning(caplog) -> None:
+    """权重之和偏离 1.0 时应输出 logger warning, 但不阻断校验."""
+    from loguru import logger as loguru_logger
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "认购",
+        "confidence": "高",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {"mid": 80.0, "anchor_method": "PE", "anchor_logic": "x"},
+        "ipo_pricing_view": "合理",
+        "key_supports": ["x"],
+        "key_risks": ["y"],
+        "decision_weights": [
+            {"factor": "业务质量", "weight": 0.50, "score": 4.0, "rationale": "x"},
+            # 故意只给 0.5, 偏离 1.0
+        ],
+    }
+    # 不应抛异常
+    result, err = validate_decision(parsed)
+    assert result is not None
+    assert result.weighted_total_score == 2.0  # 0.5 * 4.0
+
+
+def test_decision_v4_backward_compat_no_weights() -> None:
+    """旧 schema 无 decision_weights 仍能通过."""
+    from src.agents.decision import validate_decision
+
+    parsed = {
+        "recommendation": "认购",
+        "confidence": "中",
+        "suggested_amount_usd_million": [10.0, 20.0],
+        "valuation_range_hkd_billion": {"mid": 80.0, "anchor_method": "PE", "anchor_logic": "x"},
+        "ipo_pricing_view": "合理",
+        "key_supports": ["x"], "key_risks": ["y"],
+    }
+    result, err = validate_decision(parsed)
+    assert result is not None
+    assert result.decision_weights == []
+    assert result.weighted_total_score is None
+    assert result.weighted_to_recommendation_mapping == ""
+
+
+def test_render_decision_weights_markdown() -> None:
+    from src.reports.writer import _render_decision_weights
+
+    factors = [
+        {"factor": "业务质量", "weight": 0.20, "score": 4.0, "contribution": 0.80,
+         "source_agents": ["prospectus_analyst"], "rationale": "营收高于行业"},
+        {"factor": "估值合理性", "weight": 0.30, "score": 3.0, "contribution": 0.90,
+         "source_agents": ["comparable"], "rationale": "PS 处于中位"},
+    ]
+    md = _render_decision_weights(factors, total=1.70, mapping_text="1.70 → 不认购")
+    # 关键内容
+    assert "业务质量" in md
+    assert "20%" in md  # weight
+    assert "4.0" in md  # score
+    assert "0.80" in md  # contribution
+    assert "prospectus_analyst" in md
+    assert "营收高于行业" in md
+    # 加权总分行
+    assert "加权总分" in md
+    assert "1.70" in md
+    assert "不认购" in md
+    # 映射图例
+    assert "≥4.0 认购" in md and "<2.0 不认购" in md
+
+
+def test_render_decision_weights_warns_on_weight_sum() -> None:
+    from src.reports.writer import _render_decision_weights
+
+    # 只 0.5, 偏离 1.0
+    factors = [
+        {"factor": "业务质量", "weight": 0.50, "score": 4.0, "contribution": 2.0,
+         "rationale": "x", "source_agents": []},
+    ]
+    md = _render_decision_weights(factors, total=2.0, mapping_text="2.0 → 观望")
+    assert "偏离" in md or "⚠" in md  # 警告提示
+
+
+def test_render_decision_weights_handles_empty() -> None:
+    from src.reports.writer import _render_decision_weights
+    md = _render_decision_weights([], total=None, mapping_text="")
+    assert "缺失" in md or "rerun" in md
+
+
+def test_html_renders_decision_weights(tmp_path) -> None:
+    """端到端: HTML 模板渲染决策因子加权打分章节."""
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.reports.html_writer import write_ic_memo_html
+
+    extras = WorkflowExtras()
+    extras.decision_json = {
+        "recommendation": "审慎参与",
+        "confidence": "中",
+        "valuation_range_hkd_billion": {"mid": 80, "anchor_method": "PE", "anchor_logic": "x"},
+        "ipo_pricing_view": "合理",
+        "suggested_amount_usd_million": [10, 20],
+        "key_supports": ["x"], "key_risks": ["y"],
+        "decision_weights": [
+            {"factor": "业务质量", "weight": 0.20, "score": 4.0, "contribution": 0.80,
+             "source_agents": ["prospectus_analyst"], "rationale": "营收 CAGR 35%"},
+            {"factor": "估值合理性", "weight": 0.30, "score": 3.0, "contribution": 0.90,
+             "source_agents": ["comparable"], "rationale": "PS 22x 中位"},
+        ],
+        "weighted_total_score": 1.70,
+        "weighted_to_recommendation_mapping": "1.70 → 不认购 (0.0-2.0 区间)",
+    }
+    ctx = AgentContext(
+        project_id="v4_html_test", ticker="X", company_name="测试",
+        industry="x", reports_dir=tmp_path, rag=None, extras=extras,
+    )
+    out = write_ic_memo_html(ctx)
+    text = out.read_text(encoding="utf-8")
+    # 章节标题
+    assert "VI. 决策因子加权打分" in text
+    # 因子内容
+    assert "业务质量" in text
+    assert "营收 CAGR 35%" in text
+    assert "prospectus_analyst" in text
+    # 加权总分行
+    assert "weighted-total" in text  # CSS 类
+    assert "1.70" in text
+    assert "不认购" in text
+    # 映射区间图例
+    assert "≥4.0 认购" in text or "认购" in text
+    # bar chart CSS 类
+    assert "factor-weights" in text
+    assert "bar" in text
+
+
+def test_standard_decision_factors_template_intact() -> None:
+    """STANDARD_DECISION_FACTORS 6 个标准因子配置完整, 权重区间合理."""
+    from src.agents.decision import STANDARD_DECISION_FACTORS
+
+    assert len(STANDARD_DECISION_FACTORS) == 6
+    factor_names = {f["factor"] for f in STANDARD_DECISION_FACTORS}
+    assert "业务质量" in factor_names
+    assert "估值合理性" in factor_names
+    assert "风控等级" in factor_names
+    # 所有权重区间和应能加到 1.0 (上下沿组合)
+    lower_sum = sum(f["suggested_weight_range"][0] for f in STANDARD_DECISION_FACTORS)
+    upper_sum = sum(f["suggested_weight_range"][1] for f in STANDARD_DECISION_FACTORS)
+    assert lower_sum < 1.0 < upper_sum, f"权重区间下限和={lower_sum}, 上限和={upper_sum}, 应跨过 1.0"

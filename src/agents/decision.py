@@ -14,7 +14,7 @@ import re
 from typing import Any, Literal
 
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from src.agents.base import AgentContext, AgentReport, BaseAgent
 from src.llm import ModelTier
@@ -115,6 +115,34 @@ DECISION_SYSTEM = """你是港股 IPO 基石投资委员会的首席投决官，
    - confidence 反映该步骤的把握度 (高/中/低)
    - caveats: 该步骤潜在异议, 例:"假设 PS 22x 不变, 但若行业受冲击可能压缩到 15x"
 
+8. **decision_weights（决策因子加权打分卡, 5-7 个因子）⭐⭐⭐**:
+   - 这是把"多 Agent 简报"综合到"最终建议"的**显式权重机制**
+   - 不是 reasoning_chain 的替代, 是补充: 推理链解释"逻辑推导", 打分卡解释"加权综合"
+   - **必须输出 5-7 个因子**, 推荐使用以下 6 个标准因子集合 (可根据项目特征微调权重):
+     | 因子 | 建议权重区间 | 主要数据源 Agent |
+     |---|---|---|
+     | 业务质量 | 0.15-0.30 | prospectus_analyst, tech_trend |
+     | 估值合理性 | 0.20-0.35 | comparable |
+     | 风控等级 | 0.20-0.30 | risk |
+     | 宏观与行业窗口 | 0.05-0.20 | macro, industry |
+     | 辩论倾向 | 0.10-0.20 | debate_manager |
+     | 情绪与流动性 | 0.05-0.15 | sentiment |
+   - **每个因子必须填**:
+     * factor: 因子名 (使用上表中的标准名, 或更细分但要明确)
+     * weight: 0-1, 各因子之和应 ≈ 1.0 (允许 ±5% 偏差)
+     * score: 0-5, 该因子当前得分 (5=最优, 0=最差)
+     * source_agents: 数据源 Agent 名列表
+     * rationale: **必填**, 必须同时说明
+       (a) 为什么权重是这个数 (vs 标准区间的 lower/upper bound)
+       (b) 为什么得分是这个数 (引用具体 Agent 简报的关键事实)
+   - **加权总分 = Σ(weight × score)**, 系统会自动算
+   - **映射到推荐档**: ≥4.0 认购 / 3.0-4.0 审慎参与 / 2.0-3.0 观望 / <2.0 不认购
+   - **关键: 加权总分对应的推荐必须与你最终的 recommendation 字段一致**.
+     如果加权总分 = 3.5 但你的 recommendation 是"认购", 必须在论述中说明
+     "尽管加权 3.5 落在审慎参与区间, 但因 X 因素提升至认购"——否则视为前后矛盾.
+   - **可调整权重的情形**: 例如对早期成长股可上调"业务质量"权重至 0.30; 对周期股
+     上调"宏观窗口"权重至 0.20. 但每次调整都必须在 rationale 里明确说明.
+
 输出严格按下述 JSON 结构（用 ```json``` 代码块包裹），之后再补一段中文论述（不超过 1200 字）：
 
 ```json
@@ -212,9 +240,45 @@ DECISION_SYSTEM = """你是港股 IPO 基石投资委员会的首席投决官，
       "caveats": ["可比仅 2 家, 样本小; 越疆已上市 1 年, 估值更稳定"]
     },
     "... (再列 5-8 步)"
+  ],
+  "decision_weights": [
+    {
+      "factor": "业务质量", "weight": 0.20, "score": 4.0,
+      "source_agents": ["prospectus_analyst", "tech_trend"],
+      "rationale": "权重 20% 取标准区间下沿——成长股但客户集中度风险偏高, 不宜过度溢价业务质量; 得分 4.0 因为营收 CAGR 35% 显著高于行业, 毛利 38% 高于中位 35%"
+    },
+    {
+      "factor": "估值合理性", "weight": 0.30, "score": 3.0,
+      "source_agents": ["comparable"],
+      "rationale": "权重 30% 取标准区间中段——港股 IPO 破发率高, 估值是首要约束; 得分 3.0 因为 PS 22x 处于可比中位附近, 不偏低也不极端高估"
+    },
+    {
+      "factor": "风控等级", "weight": 0.25, "score": 3.5,
+      "source_agents": ["risk"],
+      "rationale": "权重 25% 标准——风控独立, 否决权大; 得分 3.5 因为风控综合评级 3.5/5, 主要风险点 (客户集中) 已识别且有 kill switch"
+    },
+    {
+      "factor": "宏观与行业窗口", "weight": 0.10, "score": 4.0,
+      "source_agents": ["macro", "industry"],
+      "rationale": "权重 10% 标准下沿——宏观影响时点不影响项目本身; 得分 4.0 因为 macro Agent 给窗口期评分 4/5, 行业景气度高"
+    },
+    {
+      "factor": "辩论倾向", "weight": 0.10, "score": 3.5,
+      "source_agents": ["debate_manager"],
+      "rationale": "权重 10% 标准下沿——辩论是双向校验, 不是独立信号; 得分 3.5 因为 debate_manager 裁决倾向 Bull, 但 Bear 提出的客户集中风险有数据支持"
+    },
+    {
+      "factor": "情绪与流动性", "weight": 0.05, "score": 3.5,
+      "source_agents": ["sentiment"],
+      "rationale": "权重 5% 标准下沿——短期情绪对锁定期影响有限; 得分 3.5 因为同期机器人板块情绪中性偏积极, 但同行业同期 IPO 较多, 资金分流风险存在"
+    }
   ]
 }
 ```
+
+注: 上述示例中 weight 之和 = 1.00, 加权总分 = 0.20×4.0 + 0.30×3.0 + 0.25×3.5 +
+0.10×4.0 + 0.10×3.5 + 0.05×3.5 = 0.80 + 0.90 + 0.875 + 0.40 + 0.35 + 0.175
+= 3.50 → 落在 3.0-4.0 区间 → "审慎参与", 与最终 recommendation 一致.
 
 之后用以下 Markdown 章节展开论述：
 
@@ -243,20 +307,28 @@ DECISION_SYSTEM = """你是港股 IPO 基石投资委员会的首席投决官，
 - probability 如何主观赋值（历史基准 / 专家判断 / 蒙特卡洛）
 
 ## 五、推理链 (Reasoning Chain) ⭐⭐
-**这是本份 memo 的核心交付物**——把"从一堆 Agent 简报推到最终建议"的链条显式化:
+**这是本份 memo 的核心交付物之一**——把"从一堆 Agent 简报推到最终建议"的链条显式化:
 - 5-10 步关键推理, 每步标注 前提 → 数据 → 计算 → 结论 → 异议
 - 让用户能 trace 任意量化结论的来源
 
-## 六、对冲与退出策略
+## 六、决策因子加权打分 ⭐⭐⭐
+**这是本份 memo 的另一核心交付物**——把"多 Agent 简报综合到最终建议"的过程从黑箱
+变为白箱: 5-7 个因子各自独立打分 + 显式权重 → 加权总分 → 推荐档位映射.
+- 每个因子的 weight 必须有 rationale (说明为什么这个权重)
+- 每个因子的 score 必须引用具体 Agent 简报 (说明为什么这个分)
+- 加权总分对应的推荐区间必须与最终 recommendation 一致 (否则需在论述里说明
+  "为什么我覆盖了加权结果")
+
+## 七、对冲与退出策略
 解释 hedging_strategy 和 exit_plan 的逻辑, 为什么这种节奏 / 工具。
 
-## 七、Kill Switches 触发条件
+## 八、Kill Switches 触发条件
 解释每条退出触发的合理性, 指出对应的 monitoring_kpis 和阈值依据。
 
-## 八、与 Bull/Bear 辩论的关系
+## 九、与 Bull/Bear 辩论的关系
 说明你采纳了哪一方哪些观点, 为什么。
 
-## 九、风险敞口与不确定性
+## 十、风险敞口与不确定性
 列出主要不确定性和应对方式, 引用风控简报。"""
 
 
@@ -362,6 +434,123 @@ class MonitoringKPI(BaseModel):
     )
 
 
+# ============================================================================
+# 决策因子加权打分卡 (v4 新增)
+#
+# 真投行 IC memo 处理"如何把多 Agent 简报综合到最终建议"的方法不是"加权求和"
+# (投决本质是 multi-factor judgment, 不是 scoring formula), 而是:
+# 1. 因子打分卡: 每维度独立 1-5 分 + 显式权重
+# 2. 加权总分 → 推荐档位映射
+# 3. 否决条件 (veto): 任一硬条件不满足直接否决, 不论加权分多高
+#
+# 我们的设计:
+# - reasoning_chain 解释"逻辑推导链"(前提→数据→计算→结论, 链状)
+# - decision_weights 解释"加权打分卡"(各维度独立打分 + 权重, 求和)
+# 两者互补: 推理链是定性论证, 打分卡是定量综合.
+# ============================================================================
+
+# 推荐的标准因子集合 + 权重区间 (LLM 可根据项目特征调整)
+STANDARD_DECISION_FACTORS: list[dict[str, Any]] = [
+    {
+        "factor": "业务质量",
+        "suggested_weight_range": (0.15, 0.30),
+        "source_agents": ["prospectus_analyst", "tech_trend"],
+        "guidance": "基本盘业务质量 + 第二曲线兑现概率 + 技术壁垒. "
+                    "成长股可上浮至 0.30; 困境反转/周期股下浮至 0.15.",
+    },
+    {
+        "factor": "估值合理性",
+        "suggested_weight_range": (0.20, 0.35),
+        "source_agents": ["comparable"],
+        "guidance": "港股 IPO 破发率高, 估值是首要约束. 估值偏高时该因子分数应低; "
+                    "估值偏低时分数高. 即使其他因子优秀, 估值过高仍应限制权重.",
+    },
+    {
+        "factor": "风控等级",
+        "suggested_weight_range": (0.20, 0.30),
+        "source_agents": ["risk"],
+        "guidance": "风控 8 维评级综合得分 (1-5, 5=极低风险). 否决条件由风控决定, "
+                    "权重必须高. 高客户集中度/财务造假嫌疑/治理结构问题等需上调.",
+    },
+    {
+        "factor": "宏观与行业窗口",
+        "suggested_weight_range": (0.05, 0.20),
+        "source_agents": ["macro", "industry"],
+        "guidance": "影响时点不影响项目本身. 牛市/赛道热点上浮; 熊市/赛道遇冷下浮. "
+                    "这个因子分数低时应降低认购金额而非否决.",
+    },
+    {
+        "factor": "辩论倾向",
+        "suggested_weight_range": (0.10, 0.20),
+        "source_agents": ["debate_manager"],
+        "guidance": "Bull/Bear 辩论裁决 + 事后可验证清单. 是双向校验维度, 不是独立信号. "
+                    "辩论分歧大时该维度本身分数中性, 但权重可调高强调'信息缺口'.",
+    },
+    {
+        "factor": "情绪与流动性",
+        "suggested_weight_range": (0.05, 0.15),
+        "source_agents": ["sentiment"],
+        "guidance": "市场情绪 + 路演渠道信号 + 同期 IPO 资金分流. 短期影响打新效果, "
+                    "对 6 月禁售期内的破发概率有直接关联.",
+    },
+]
+
+
+class FactorWeight(BaseModel):
+    """单一决策因子的权重 + 得分。
+
+    最终建议 = 各因子的 weight × score 加权求和, 映射到 推荐档位.
+    """
+    model_config = ConfigDict(extra="ignore")
+    factor: str = Field(description="因子名, 例: '业务质量' / '估值合理性' / '风控等级'")
+    weight: float = Field(ge=0, le=1, description="该因子在决议中的权重, 各因子之和应 ≈ 1.0")
+    score: float = Field(ge=0, le=5, description="该因子当前得分, 0=最差 5=最优")
+    contribution: float = Field(default=0.0, description="weight × score, 缺失时自动算")
+    source_agents: list[str] = Field(
+        default_factory=list,
+        description="该因子打分依据的 Agent 名 (用于 trace 来源)",
+    )
+    rationale: str = Field(
+        default="",
+        description="必填: 为什么给这个权重 + 为什么这个得分",
+    )
+
+    @model_validator(mode="after")
+    def _ensure_contribution(self) -> "FactorWeight":
+        # contribution 优先取 LLM 输出, 缺失或异常时自动算 weight × score
+        if self.contribution == 0.0 or self.contribution > 5.0:
+            object.__setattr__(self, "contribution", round(self.weight * self.score, 3))
+        return self
+
+
+# 加权总分 → 推荐档位映射 (各档区间)
+RECOMMENDATION_MAPPING: list[tuple[float, float, str]] = [
+    (4.0, 5.0, "认购"),
+    (3.0, 4.0, "审慎参与"),
+    (2.0, 3.0, "观望"),
+    (0.0, 2.0, "不认购"),
+]
+
+
+def map_score_to_recommendation(score: float) -> str:
+    """加权总分 → 推荐档位."""
+    for low, high, rec in RECOMMENDATION_MAPPING:
+        if low <= score < high:
+            return rec
+    if score >= 5.0:
+        return "认购"
+    return "不认购"
+
+
+def format_score_mapping(score: float) -> str:
+    """渲染映射区间说明, 例: '3.50 → 审慎参与 (3.0-4.0 区间)'."""
+    rec = map_score_to_recommendation(score)
+    for low, high, r in RECOMMENDATION_MAPPING:
+        if r == rec:
+            return f"{score:.2f} → {rec} ({low:.1f}-{high:.1f} 区间)"
+    return f"{score:.2f} → {rec}"
+
+
 class ReasoningStep(BaseModel):
     """投决推理链的一步。
 
@@ -421,6 +610,50 @@ class DecisionResult(BaseModel):
         description="5-10 步关键推理（前提→数据→计算→结论），让用户从最终建议 trace "
         "回每个量化指标的来源",
     )
+
+    # 决策因子加权打分 v4 新增（显式权重, 让用户看到每个维度的贡献）
+    decision_weights: list[FactorWeight] = Field(
+        default_factory=list,
+        description="决策因子加权打分卡 (5-7 个因子). 各 weight 之和应 ≈ 1.0; "
+        "加权总分 = Σ(weight × score), 映射到推荐档位 (≥4 认购 / 3-4 审慎 / "
+        "2-3 观望 / <2 不认购).",
+    )
+    weighted_total_score: float | None = Field(
+        default=None,
+        description="加权总分 0-5, 缺失时由 model_validator 自动算",
+    )
+    weighted_to_recommendation_mapping: str = Field(
+        default="",
+        description="例: '3.50 → 审慎参与 (3.0-4.0 区间)'. 缺失时自动渲染",
+    )
+
+    @model_validator(mode="after")
+    def _ensure_weighted_total(self) -> "DecisionResult":
+        """自动算加权总分 + 映射文本 + 校验权重之和。"""
+        if not self.decision_weights:
+            return self
+        # 自动算 contribution 之和
+        if self.weighted_total_score is None:
+            object.__setattr__(
+                self,
+                "weighted_total_score",
+                round(sum(f.contribution for f in self.decision_weights), 3),
+            )
+        # 自动渲染映射文本
+        if not self.weighted_to_recommendation_mapping and self.weighted_total_score is not None:
+            object.__setattr__(
+                self,
+                "weighted_to_recommendation_mapping",
+                format_score_mapping(self.weighted_total_score),
+            )
+        # 软警告: 权重之和偏离 1.0
+        total_w = sum(f.weight for f in self.decision_weights)
+        if not (0.92 <= total_w <= 1.08):
+            logger.warning(
+                f"[Decision] 决策因子权重之和 = {total_w:.3f}, 偏离 1.0 (±8%); "
+                f"加权总分可能不可比. 因子: {[f.factor for f in self.decision_weights]}"
+            )
+        return self
 
 
 def _briefs_block(briefs: dict[str, str]) -> str:
