@@ -14,7 +14,7 @@ import re
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------- 公共基类 ----------
@@ -193,6 +193,15 @@ class Prediction(BaseModel):
     # 多样性 variants 使用情况（Phase B）
     diversity_variants: dict[str, list[str]] = Field(default_factory=dict)
 
+    # 决策因子加权打分卡 v4 (落库, 供 PostmortemAgent 读取做权重校准)
+    decision_weights: list[dict] = Field(
+        default_factory=list,
+        description="当时的决策因子加权打分卡, 每项含 factor / weight / score / contribution / "
+        "source_agents / rationale. 用于 PostmortemAgent 事后做权重校准.",
+    )
+    weighted_total_score: float | None = None
+    weighted_to_recommendation_mapping: str = ""
+
     # 可复现性元信息
     model_provider: str
     model_tier_models: dict[str, str] = Field(default_factory=dict)
@@ -256,6 +265,34 @@ class Outcome(BaseModel):
 
 # ---------- 评分对比 (Score) ----------
 
+class WeightCalibration(BaseModel):
+    """单个决策因子的事后权重校准建议。
+
+    PostmortemAgent 在复盘时, 对当时的 decision_weights 每个因子输出一条:
+    "事后看, 这个因子的权重应该调到多少, 为什么"。
+
+    多个项目积累后, 系统按 (industry, recommendation) 聚合这些 calibration
+    作为下个相似项目的 prior, 注入 Decision Agent prompt.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    factor: str = Field(description="因子名 (与 decision_weights 中的 factor 对应)")
+    actual_weight_used: float = Field(ge=0, le=1, description="当时给的权重")
+    suggested_weight: float = Field(ge=0, le=1, description="事后看应该给的权重")
+    delta: float = Field(default=0.0, description="suggested - actual, 自动算")
+    rationale: str = Field(description="为什么调整 (基于实际结果)")
+
+    @model_validator(mode="after")
+    def _ensure_delta(self) -> "WeightCalibration":
+        # delta 缺失或为 0 时自动算 suggested - actual
+        if self.delta == 0.0:
+            object.__setattr__(
+                self, "delta",
+                round(self.suggested_weight - self.actual_weight_used, 4),
+            )
+        return self
+
+
 class Score(BaseModel):
     """Postmortem Agent 输出的复盘评分。Phase C 用。"""
     model_config = ConfigDict(extra="ignore")
@@ -284,3 +321,10 @@ class Score(BaseModel):
     # 复盘备忘录
     postmortem_memo: str = ""
     error_root_causes: list[str] = Field(default_factory=list)  # 信息缺失/推理错误/估值不当/黑天鹅
+
+    # 决策因子权重校准建议（Phase A 新增, 供 Phase B 聚合用）
+    weight_calibrations: list[WeightCalibration] = Field(
+        default_factory=list,
+        description="每个决策因子的事后权重校准建议. 累积多个项目后, "
+        "按 (industry, recommendation) 聚合作为新项目的 prior",
+    )

@@ -23,6 +23,7 @@ from .models import (
     Prediction,
     Outcome,
     Score,
+    WeightCalibration,
 )
 from .postmortem import PostmortemAgent
 from .store import FeedbackStore
@@ -39,6 +40,7 @@ __all__ = [
     "Prediction",
     "Outcome",
     "Score",
+    "WeightCalibration",
     "FeedbackStore",
     "PostmortemAgent",
     "CaseRAG",

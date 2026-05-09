@@ -18,9 +18,24 @@ from typing import Any
 from loguru import logger
 from pydantic import ValidationError
 
-from src.feedback.models import Outcome, Prediction, Score
+from src.feedback.models import Outcome, Prediction, Score, WeightCalibration
 from src.feedback.store import FeedbackStore
 from src.llm import LLMClient, ModelTier
+
+
+def _recover_weight_calibrations(raw: Any) -> list[WeightCalibration]:
+    """从 LLM 原始 weight_calibrations 数组逐条尝试解析, 跳过坏数据."""
+    if not isinstance(raw, list):
+        return []
+    out: list[WeightCalibration] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            out.append(WeightCalibration.model_validate(item))
+        except (ValidationError, TypeError, ValueError):
+            continue
+    return out
 
 
 POSTMORTEM_SYSTEM = """你是港股 IPO 基石投资委员会的复盘官。你的任务是客观、严谨地对比
@@ -57,9 +72,28 @@ POSTMORTEM_SYSTEM = """你是港股 IPO 基石投资委员会的复盘官。你�
     "risk": <0-1>
   },
   "confidence_calibration_delta": <数字 或 null, 我们说"高/中/低"置信度时实际命中率差距>,
-  "error_root_causes": [<"信息缺失"|"推理错误"|"估值方法不当"|"黑天鹅" 的子集>]
+  "error_root_causes": [<"信息缺失"|"推理错误"|"估值方法不当"|"黑天鹅" 的子集>],
+  "weight_calibrations": [
+    {
+      "factor": "<因子名, 必须与当时 decision_weights 中的 factor 一致>",
+      "actual_weight_used": <当时给的权重 0-1>,
+      "suggested_weight": <事后看应该给的权重 0-1>,
+      "rationale": "<为什么调整, 必须基于实际结果给具体依据>"
+    }
+  ]
 }
 ```
+
+【关于 weight_calibrations 的强约束】
+- **必须为当时 decision_weights 里的每个因子各输出一条建议** (即使不调整也要写 actual=suggested 并解释为什么"刚好对了")
+- 调整方向规则:
+  * 如果某因子(score 高 / 权重大) 的方向**与实际结果一致** (该因子高分但实际表现好, 或低分但实际差) → 维持或微调权重
+  * 如果某因子(score 高 / 权重大) 但**实际结果相反** (高分但破发) → suggested_weight 应**降低**,
+    rationale 说明"该因子事后看是过度溢价"
+  * 如果某因子(score 低或权重小) 但**实际结果证明它关键** (低权重的"风控"事后是决定性) →
+    suggested_weight 应**升高**, rationale 说明"该因子被忽视, 应提权"
+- rationale 必须引用具体实际数据 (例: "实际 d180 -25% 破发, 说明当时风控等级 3.5 分偏乐观, 应给 2.0; 权重 25% 偏低, 应升至 35%")
+- 调整幅度建议 ±5pp ~ ±15pp 之间, 极端情况 ±20pp; 单次调整 > 20pp 需特别说明
 
 之后用以下 Markdown 章节:
 
@@ -72,11 +106,40 @@ POSTMORTEM_SYSTEM = """你是港股 IPO 基石投资委员会的复盘官。你�
 ## 三、根因分析
 （如果决议错了，错在哪？信息层 / 推理层 / 估值层 / 不可预测）
 
-## 四、教训与可迁移经验
+## 四、决策因子权重校准建议 ⭐
+（针对当时 decision_weights 每个因子, 详细说明事后看应该如何调权 + 调权依据。
+这一章是数据驱动调权的核心: 多个项目的此章会被聚合成下个项目的 prior 注入 prompt。）
+
+## 五、教训与可迁移经验
 （写给"下一个类似项目分析"看：什么信号本次被忽视；什么估值方法本次失效；
 未来类似行业/规模/估值倍数的项目，应额外关注什么）
 
-第四节是这次复盘对系统的最大价值——它会被注入到未来类似项目的 prompt 里。"""
+第四+五节是这次复盘对系统的最大价值——会注入到未来类似项目的 prompt 里。"""
+
+
+def _render_decision_weights_for_postmortem(p: Prediction) -> str:
+    """渲染当时的 decision_weights 给 PostmortemAgent 看。
+
+    LLM 必须基于这份当时的权重做事后校准建议, 而不是凭空给。
+    """
+    weights = p.decision_weights or []
+    if not weights:
+        return "（当时未输出 decision_weights, weight_calibrations 留空数组即可）"
+
+    lines = ["| 因子 | 权重 | 得分 | 贡献 | 权重 + 得分理由 |",
+             "|---|---|---|---|---|"]
+    for f in weights:
+        if not isinstance(f, dict):
+            continue
+        w = float(f.get("weight", 0) or 0)
+        s = float(f.get("score", 0) or 0)
+        c = float(f.get("contribution") or w * s)
+        rationale = (f.get("rationale", "") or "—")[:160]
+        lines.append(
+            f"| {f.get('factor', '—')} | {w*100:.0f}% | {s:.1f} | "
+            f"{c:.2f} | {rationale} |"
+        )
+    return "\n".join(lines)
 
 
 def _build_postmortem_input(p: Prediction, o: Outcome) -> tuple[str, dict]:
@@ -119,6 +182,9 @@ def _build_postmortem_input(p: Prediction, o: Outcome) -> tuple[str, dict]:
 
 ## 当时设定的硬条件
 {chr(10).join(f"- {c}" for c in p.deal_conditions)}
+
+## 当时的决策因子加权打分（待校准的核心字段）
+{_render_decision_weights_for_postmortem(p)}
 
 ## 当时的 Agent 评分卡
 {json.dumps(p.agent_score_cards, ensure_ascii=False, indent=2)}
@@ -212,11 +278,15 @@ class PostmortemAgent:
                 score = Score.model_validate(parsed)
             except ValidationError as e:
                 logger.warning(f"Score schema 校验失败: {e}; fallback 用最小记录")
+                # fallback: 即使整体校验失败, 也尽量保留 weight_calibrations
+                # (Phase B 聚合需要这些数据)
+                wc_recovered = _recover_weight_calibrations(parsed.get("weight_calibrations"))
                 score = Score(
                     prediction_id=prediction_id,
                     score_date=datetime.now(),
                     recommendation_score=float(parsed.get("recommendation_score", 0)),
                     postmortem_memo=memo_text,
+                    weight_calibrations=wc_recovered,
                 )
 
         store.save_score(score)

@@ -2131,3 +2131,247 @@ def test_standard_decision_factors_template_intact() -> None:
     lower_sum = sum(f["suggested_weight_range"][0] for f in STANDARD_DECISION_FACTORS)
     upper_sum = sum(f["suggested_weight_range"][1] for f in STANDARD_DECISION_FACTORS)
     assert lower_sum < 1.0 < upper_sum, f"权重区间下限和={lower_sum}, 上限和={upper_sum}, 应跨过 1.0"
+
+
+# ============================================================================
+# 权重校准 Phase A + B (事后调权 + 聚合 prior 注入)
+# ============================================================================
+
+def test_weight_calibration_auto_delta() -> None:
+    """delta 缺失时自动算 suggested - actual."""
+    from src.feedback.models import WeightCalibration
+
+    wc = WeightCalibration(
+        factor="业务质量", actual_weight_used=0.20, suggested_weight=0.10,
+        rationale="营收没兑现",
+    )
+    assert wc.delta == -0.10  # 0.10 - 0.20 = -0.10
+    # 显式给 delta 应保留 (但若为 0 仍会重算)
+    wc2 = WeightCalibration(
+        factor="x", actual_weight_used=0.30, suggested_weight=0.40,
+        delta=0.123, rationale="x",
+    )
+    assert wc2.delta == 0.123
+
+
+def test_score_supports_weight_calibrations() -> None:
+    from datetime import datetime
+    from src.feedback.models import Score, WeightCalibration
+
+    cals = [
+        WeightCalibration(factor="业务质量", actual_weight_used=0.20,
+                          suggested_weight=0.10, rationale="x"),
+        WeightCalibration(factor="风控等级", actual_weight_used=0.25,
+                          suggested_weight=0.35, rationale="y"),
+    ]
+    s = Score(
+        prediction_id=1, score_date=datetime.now(),
+        recommendation_score=-0.2,
+        weight_calibrations=cals,
+    )
+    assert len(s.weight_calibrations) == 2
+    assert s.weight_calibrations[0].delta == -0.10
+    assert s.weight_calibrations[1].delta == 0.10
+
+
+def test_recover_weight_calibrations_skips_invalid() -> None:
+    """坏数据应被跳过, 好数据保留."""
+    from src.feedback.postmortem import _recover_weight_calibrations
+
+    raw = [
+        {"factor": "业务质量", "actual_weight_used": 0.20,
+         "suggested_weight": 0.10, "rationale": "x"},  # OK
+        "not a dict",                                   # 跳过
+        {"factor": "x"},                                # 缺字段 → 跳过
+        {"factor": "风控", "actual_weight_used": 0.25,
+         "suggested_weight": 0.35, "rationale": "y"},   # OK
+    ]
+    out = _recover_weight_calibrations(raw)
+    assert len(out) == 2
+    assert out[0].factor == "业务质量"
+    assert out[1].factor == "风控"
+
+
+def test_predictions_table_persists_decision_weights(tmp_path) -> None:
+    """save_prediction → get_prediction round-trip 保留 decision_weights / weighted 字段."""
+    from datetime import datetime
+    from src.feedback import FeedbackStore
+    from src.feedback.models import Prediction
+
+    s = FeedbackStore(db_path=tmp_path / "test.sqlite")
+    p = Prediction(
+        project_id="wp_test", ticker="X", company_name="测试", industry="工业机器人",
+        decision_date=datetime.now(),
+        recommendation="审慎参与", confidence="中",
+        valuation_mid=80, anchor_method="PE", ipo_pricing_view="合理",
+        suggested_amount_low_usd_m=10, suggested_amount_high_usd_m=20,
+        decision_weights=[
+            {"factor": "业务质量", "weight": 0.20, "score": 4.0, "contribution": 0.80,
+             "rationale": "x", "source_agents": ["prospectus_analyst"]},
+        ],
+        weighted_total_score=3.50,
+        weighted_to_recommendation_mapping="3.50 → 审慎参与",
+        model_provider="kimi",
+    )
+    pid = s.save_prediction(p)
+    fetched = s.get_prediction(pid)
+    assert fetched is not None
+    assert len(fetched.decision_weights) == 1
+    assert fetched.decision_weights[0]["factor"] == "业务质量"
+    assert fetched.weighted_total_score == 3.50
+
+
+def test_get_weight_calibration_priors_returns_empty_when_no_data(tmp_path) -> None:
+    """完全没有 score 时, priors 应返 sample_size=0, 不抛异常."""
+    from src.feedback import FeedbackStore
+
+    s = FeedbackStore(db_path=tmp_path / "test.sqlite")
+    out = s.get_weight_calibration_priors(industry="工业机器人")
+    assert out["sample_size"] == 0
+    assert out["calibrations"] == []
+
+
+def test_get_weight_calibration_priors_below_min_samples(tmp_path) -> None:
+    """样本数 < min_samples 时 calibrations 为空, sample_size 仍然返回真实数."""
+    from datetime import datetime
+    from src.feedback import FeedbackStore
+    from src.feedback.models import Prediction, Score, WeightCalibration
+
+    s = FeedbackStore(db_path=tmp_path / "test.sqlite")
+    # 插 3 个项目 (< 默认 min_samples=5)
+    for i in range(3):
+        p = Prediction(
+            project_id=f"p{i}", ticker=str(i), company_name=f"测试{i}",
+            industry="工业机器人/协作机器人", decision_date=datetime.now(),
+            recommendation="认购", confidence="中",
+            valuation_mid=80, anchor_method="PE", ipo_pricing_view="合理",
+            suggested_amount_low_usd_m=10, suggested_amount_high_usd_m=20,
+            model_provider="kimi",
+        )
+        pid = s.save_prediction(p)
+        sc = Score(
+            prediction_id=pid, score_date=datetime.now(),
+            recommendation_score=-0.2,
+            weight_calibrations=[
+                WeightCalibration(factor="业务质量", actual_weight_used=0.20,
+                                  suggested_weight=0.10, rationale="过度溢价"),
+            ],
+        )
+        s.save_score(sc)
+
+    priors = s.get_weight_calibration_priors(industry="工业机器人")
+    assert priors["sample_size"] == 3
+    assert priors["calibrations"] == []  # 不足 min_samples
+    assert "min_samples_required" in priors
+
+
+def test_get_weight_calibration_priors_aggregates_at_threshold(tmp_path) -> None:
+    """达到 min_samples 时聚合 calibrations 按 factor."""
+    from datetime import datetime
+    from src.feedback import FeedbackStore
+    from src.feedback.models import Prediction, Score, WeightCalibration
+
+    s = FeedbackStore(db_path=tmp_path / "test.sqlite")
+    # 插 5 个项目, 业务质量 delta 全为 -0.10 (一致信号), 风控 delta 全为 +0.05
+    for i in range(5):
+        p = Prediction(
+            project_id=f"p{i}", ticker=str(i), company_name=f"x{i}",
+            industry="工业机器人", decision_date=datetime.now(),
+            recommendation="认购", confidence="中",
+            valuation_mid=80, anchor_method="PE", ipo_pricing_view="合理",
+            suggested_amount_low_usd_m=10, suggested_amount_high_usd_m=20,
+            model_provider="kimi",
+        )
+        pid = s.save_prediction(p)
+        sc = Score(
+            prediction_id=pid, score_date=datetime.now(),
+            recommendation_score=-0.2,
+            weight_calibrations=[
+                WeightCalibration(
+                    factor="业务质量", actual_weight_used=0.20, suggested_weight=0.10,
+                    rationale=f"项目 {i}: 营收没兑现",
+                ),
+                WeightCalibration(
+                    factor="风控等级", actual_weight_used=0.25, suggested_weight=0.30,
+                    rationale=f"项目 {i}: 风控被低估",
+                ),
+            ],
+        )
+        s.save_score(sc)
+
+    priors = s.get_weight_calibration_priors(industry="工业机器人", min_samples=5)
+    assert priors["sample_size"] == 5
+    assert len(priors["calibrations"]) == 2
+    # 按 |avg_delta| 排序: 业务质量 (-0.10) > 风控 (+0.05) → 排前面
+    bq = priors["calibrations"][0]
+    fk = priors["calibrations"][1]
+    assert bq["factor"] == "业务质量"
+    assert abs(bq["avg_delta"] - (-0.10)) < 0.001
+    assert bq["samples"] == 5
+    assert fk["factor"] == "风控等级"
+    assert abs(fk["avg_delta"] - 0.05) < 0.001
+    # rationale 示例存在
+    assert len(bq["rationale_examples"]) >= 1
+
+
+def test_render_weight_priors_for_prompt_handles_empty() -> None:
+    from src.agents.decision import _render_weight_priors_for_prompt
+
+    # 完全空
+    assert _render_weight_priors_for_prompt({}) == ""
+    # 样本量不足
+    txt = _render_weight_priors_for_prompt({
+        "sample_size": 3, "calibrations": [], "min_samples_required": 5,
+    })
+    assert "暂无聚合校准" in txt or "STANDARD_DECISION_FACTORS" in txt
+    # 有数据
+    txt2 = _render_weight_priors_for_prompt({
+        "sample_size": 5,
+        "calibrations": [
+            {"factor": "业务质量", "avg_delta": -0.10, "samples": 5,
+             "min_delta": -0.15, "max_delta": -0.05,
+             "rationale_examples": ["项目 A: 营收没兑现"]},
+        ],
+    })
+    assert "历史权重校准参考" in txt2
+    assert "业务质量" in txt2
+    assert "下调" in txt2  # delta < 0
+    assert "项目 A" in txt2
+
+
+def test_decision_prompt_skips_priors_block_when_no_data() -> None:
+    """ctx.extras.weight_priors 空时, prompt 不应有"历史权重校准"块."""
+    from src.agents.decision import _render_weight_priors_for_prompt
+    # 空 dict / None / sample_size=0 都不出现
+    assert _render_weight_priors_for_prompt({}) == ""
+    assert _render_weight_priors_for_prompt(None) == ""
+    assert _render_weight_priors_for_prompt({"sample_size": 0, "calibrations": []}) == ""
+
+
+def test_postmortem_prompt_includes_decision_weights() -> None:
+    """PostmortemAgent 必须把当时的 decision_weights 渲染给 LLM."""
+    from datetime import datetime
+    from src.feedback.models import Outcome, Prediction
+    from src.feedback.postmortem import _build_postmortem_input, _render_decision_weights_for_postmortem
+
+    p = Prediction(
+        project_id="x", ticker="X", company_name="测试",
+        industry="x", decision_date=datetime.now(),
+        recommendation="认购", confidence="中",
+        valuation_mid=80, anchor_method="PE", ipo_pricing_view="合理",
+        suggested_amount_low_usd_m=10, suggested_amount_high_usd_m=20,
+        decision_weights=[
+            {"factor": "业务质量", "weight": 0.20, "score": 4.0, "contribution": 0.80,
+             "rationale": "x", "source_agents": ["prospectus_analyst"]},
+        ],
+        model_provider="kimi",
+    )
+    o = Outcome(prediction_id=1, recorded_date=datetime.now(),
+                d180_return=-0.30, was_broken_ipo_d180=True)
+    body, _ = _build_postmortem_input(p, o)
+    # 渲染的 weights 表必须出现在 body 里
+    assert "决策因子加权打分" in body or "业务质量" in body
+    # 直接测试渲染器
+    md = _render_decision_weights_for_postmortem(p)
+    assert "业务质量" in md
+    assert "20%" in md

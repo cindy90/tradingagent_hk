@@ -45,6 +45,10 @@ class WorkflowExtras:
     # 同期 / 未来 60 天同行业其它 IPO（用于评估资金分流效应）
     competing_ipos: list = field(default_factory=list)
 
+    # 历史权重校准 priors (Phase B): 当样本足够时, workflow 会从 SQLite scores 表
+    # 聚合同行业 calibration, 注入 Decision Agent 作为软引导
+    weight_priors: dict = field(default_factory=dict)
+
     # 目标公司本身的 iFinD 估值/财务（IPO 询价阶段也常已建档）
     target_valuation: dict | None = None
 

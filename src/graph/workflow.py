@@ -638,6 +638,12 @@ def persist_prediction(ctx: AgentContext, llm: LLMClient) -> int | None:
         key_risks=list(decision.get("key_risks", [])),
         deal_conditions=list(decision.get("deal_conditions", [])),
         monitoring_kpis=list(decision.get("monitoring_kpis", [])),
+        # v4 决策因子加权打分卡, 持久化用于 PostmortemAgent 事后校准
+        decision_weights=list(decision.get("decision_weights", []) or []),
+        weighted_total_score=decision.get("weighted_total_score"),
+        weighted_to_recommendation_mapping=str(
+            decision.get("weighted_to_recommendation_mapping", "") or ""
+        ),
         agent_score_cards=score_cards,
         model_provider=s.llm_provider,
         model_tier_models=tier_to_model,
@@ -893,6 +899,13 @@ class CornerstoneWorkflow:
             except Exception as e:
                 logger.warning(f"CaseRAG 检索失败（不影响主流程）: {e}")
 
+        # 决策因子权重校准 priors (Phase B): 同行业历史复盘 → 平均偏差 → 注入
+        # 样本数 < 5 时优雅降级 (返回空, Decision prompt 不渲染)
+        try:
+            self._inject_weight_priors(ctx)
+        except Exception as e:
+            logger.warning(f"权重校准 priors 注入失败（不影响主流程）: {e}")
+
         logger.info(f"=== 工作流启动: {ctx.project_id} ===")
 
         for i, agent in enumerate(self.steps, start=1):
@@ -931,6 +944,39 @@ class CornerstoneWorkflow:
             logger.warning(f"prediction 落库失败（不影响报告产出）: {e}")
         logger.info(f"=== 工作流完成，报告目录: {ctx.reports_dir} ===")
         return ctx
+
+    @staticmethod
+    def _inject_weight_priors(ctx: AgentContext, min_samples: int = 5) -> None:
+        """从历史 closed predictions 的 PostmortemAgent 输出聚合权重校准 priors,
+        注入 ctx.extras.weight_priors. Decision Agent prompt 会按需渲染。
+
+        样本量 < min_samples 时不注入 (避免小样本误导)。
+        """
+        try:
+            from src.feedback import FeedbackStore
+        except ImportError:
+            return
+        store = FeedbackStore()
+        try:
+            priors = store.get_weight_calibration_priors(
+                industry=ctx.industry,
+                recommendation=None,  # 当前还没决议, 不按 recommendation 过滤
+                min_samples=min_samples,
+            )
+        finally:
+            store.close()
+        ctx.extras.weight_priors = priors
+        n = priors.get("sample_size", 0)
+        n_factors = len(priors.get("calibrations", []))
+        if n_factors > 0:
+            logger.info(
+                f"[Weight Priors] 历史 {n} 个样本聚合 → {n_factors} 个因子的平均偏差, "
+                f"将注入 Decision prompt"
+            )
+        else:
+            logger.info(
+                f"[Weight Priors] 历史 closed 样本 {n} (门槛 {min_samples}), 不注入校准"
+            )
 
     @staticmethod
     def _inject_similar_cases(ctx: AgentContext) -> None:

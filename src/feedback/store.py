@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS predictions (
     agent_score_cards_json TEXT,
     reviewer_scores_json TEXT,
     diversity_variants_json TEXT,
+    decision_weights_json TEXT,
+    weighted_total_score REAL,
+    weighted_to_recommendation_mapping TEXT,
 
     model_provider TEXT,
     model_tier_models_json TEXT,
@@ -119,6 +122,8 @@ CREATE TABLE IF NOT EXISTS scores (
     postmortem_memo TEXT,
     error_root_causes_json TEXT,
 
+    weight_calibrations_json TEXT,
+
     FOREIGN KEY (prediction_id) REFERENCES predictions(id) ON DELETE CASCADE
 );
 
@@ -129,9 +134,10 @@ _JSON_FIELDS_PRED = {
     "key_supports", "key_risks", "deal_conditions", "monitoring_kpis",
     "agent_score_cards", "reviewer_scores", "diversity_variants",
     "model_tier_models", "cogalpha_features_used",
+    "decision_weights",
 }
 _JSON_FIELDS_OUT = {"notable_events"}
-_JSON_FIELDS_SCR = {"per_agent_quality", "error_root_causes"}
+_JSON_FIELDS_SCR = {"per_agent_quality", "error_root_causes", "weight_calibrations"}
 
 
 def _to_db_value(v: Any) -> Any:
@@ -153,7 +159,35 @@ class FeedbackStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """轻量迁移：对老 DB 增加新列（不会冲突, 已存在时忽略）。"""
+        existing_score_cols = {
+            r[1] for r in self._conn.execute("PRAGMA table_info(scores)").fetchall()
+        }
+        if "weight_calibrations_json" not in existing_score_cols:
+            try:
+                self._conn.execute("ALTER TABLE scores ADD COLUMN weight_calibrations_json TEXT")
+                logger.info("[migrate] scores 表添加列 weight_calibrations_json")
+            except sqlite3.OperationalError as e:
+                logger.debug(f"[migrate] 添加 weight_calibrations_json 失败: {e}")
+
+        existing_pred_cols = {
+            r[1] for r in self._conn.execute("PRAGMA table_info(predictions)").fetchall()
+        }
+        for col, ddl in [
+            ("decision_weights_json", "TEXT"),
+            ("weighted_total_score", "REAL"),
+            ("weighted_to_recommendation_mapping", "TEXT"),
+        ]:
+            if col not in existing_pred_cols:
+                try:
+                    self._conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {ddl}")
+                    logger.info(f"[migrate] predictions 表添加列 {col}")
+                except sqlite3.OperationalError as e:
+                    logger.debug(f"[migrate] 添加 {col} 失败: {e}")
 
     def close(self) -> None:
         self._conn.close()
@@ -298,6 +332,154 @@ class FeedbackStore:
         return _row_to_score(row) if row else None
 
     # ---------- 统计 ----------
+
+    # ---------- weight calibration priors (Phase B) ----------
+
+    def get_weight_calibration_priors(
+        self,
+        industry: str,
+        recommendation: str | None = None,
+        *,
+        min_samples: int = 5,
+        max_samples: int = 30,
+    ) -> dict[str, Any]:
+        """聚合历史 closed prediction 的权重校准建议, 给新项目当 prior。
+
+        逻辑:
+          1. JOIN predictions × scores, 取 (industry 模糊匹配)
+             AND (recommendation 一致 / 或全部) AND (有 weight_calibrations)
+          2. 解析 scores.weight_calibrations_json, 按 factor 分组
+          3. 对每个 factor 算: avg(suggested_weight - actual_weight_used) → 平均偏差
+          4. 样本量 < min_samples 时返回 {"sample_size": N, "calibrations": []} (不阻断, 只是不注入)
+
+        Returns:
+          {
+            "sample_size": N,                  # 命中样本数
+            "industry_filter": industry,
+            "recommendation_filter": recommendation,
+            "calibrations": [
+              {"factor": "业务质量", "avg_delta": -0.08, "samples": 6,
+               "min_delta": -0.15, "max_delta": 0.02,
+               "rationale_examples": ["...", "..."]},
+              ...
+            ]
+          }
+        """
+        # 模糊行业匹配 - 取核心 2-3 字
+        industry_keywords = self._derive_industry_keywords(industry)
+        if not industry_keywords:
+            return {"sample_size": 0, "calibrations": [],
+                    "industry_filter": industry, "recommendation_filter": recommendation}
+
+        # 构 SQL: 必须 closed (有 outcome 才有意义) + 有 calibration
+        like_clauses = " OR ".join(["p.industry LIKE ?"] * len(industry_keywords))
+        like_args = [f"%{k}%" for k in industry_keywords]
+
+        sql = f"""
+            SELECT p.industry, p.recommendation, s.weight_calibrations_json
+            FROM scores s
+            JOIN predictions p ON p.id = s.prediction_id
+            WHERE ({like_clauses})
+              AND s.weight_calibrations_json IS NOT NULL
+              AND s.weight_calibrations_json != '[]'
+        """
+        args = list(like_args)
+        if recommendation:
+            sql += " AND p.recommendation = ?"
+            args.append(recommendation)
+        sql += " ORDER BY s.score_date DESC LIMIT ?"
+        args.append(max_samples)
+
+        rows = self._conn.execute(sql, args).fetchall()
+        if not rows:
+            return {"sample_size": 0, "calibrations": [],
+                    "industry_filter": industry, "recommendation_filter": recommendation}
+
+        # 按 factor 聚合
+        from collections import defaultdict
+        deltas_by_factor: dict[str, list[float]] = defaultdict(list)
+        rationales_by_factor: dict[str, list[str]] = defaultdict(list)
+
+        for row in rows:
+            try:
+                cals = json.loads(row["weight_calibrations_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(cals, list):
+                continue
+            for c in cals:
+                if not isinstance(c, dict):
+                    continue
+                factor = c.get("factor")
+                if not factor:
+                    continue
+                delta = c.get("delta")
+                if delta is None:
+                    actual = c.get("actual_weight_used", 0)
+                    suggested = c.get("suggested_weight", 0)
+                    delta = round(suggested - actual, 4) if (actual or suggested) else 0
+                try:
+                    deltas_by_factor[factor].append(float(delta))
+                except (TypeError, ValueError):
+                    continue
+                rationale = (c.get("rationale") or "").strip()
+                if rationale:
+                    rationales_by_factor[factor].append(rationale)
+
+        n_samples = len(rows)
+        if n_samples < min_samples:
+            # 样本量不足, 返回但 calibrations 为空, prompt 注入逻辑会跳过
+            return {
+                "sample_size": n_samples, "calibrations": [],
+                "industry_filter": industry, "recommendation_filter": recommendation,
+                "min_samples_required": min_samples,
+                "note": f"历史样本 {n_samples} < 最低门槛 {min_samples}, 不注入校准",
+            }
+
+        # 聚合每个 factor 的平均偏差 + min/max + rationale 示例
+        calibrations = []
+        for factor, deltas in deltas_by_factor.items():
+            if not deltas:
+                continue
+            avg_delta = round(sum(deltas) / len(deltas), 4)
+            calibrations.append({
+                "factor": factor,
+                "avg_delta": avg_delta,
+                "samples": len(deltas),
+                "min_delta": round(min(deltas), 4),
+                "max_delta": round(max(deltas), 4),
+                # 取最近 2 条 rationale 作为示例
+                "rationale_examples": rationales_by_factor.get(factor, [])[:2],
+            })
+        # 按 |avg_delta| 排序, 偏差大的因子放前面 (LLM 更关注)
+        calibrations.sort(key=lambda x: abs(x["avg_delta"]), reverse=True)
+
+        return {
+            "sample_size": n_samples,
+            "industry_filter": industry,
+            "recommendation_filter": recommendation,
+            "calibrations": calibrations,
+        }
+
+    @staticmethod
+    def _derive_industry_keywords(industry: str) -> list[str]:
+        """从 industry 字段抽核心关键词, 用于模糊匹配。"""
+        if not industry:
+            return []
+        parts = [p.strip() for p in industry.replace("、", "/").replace(",", "/").split("/")]
+        out: set[str] = set()
+        for p in parts:
+            if not p:
+                continue
+            # 取 ≥ 2 字的子串作为关键词
+            if len(p) >= 2:
+                out.add(p)
+            for sub in p.split():
+                if len(sub) >= 2:
+                    out.add(sub)
+        return list(out)
+
+    # ---------- stats ----------
 
     def stats_summary(self) -> dict[str, Any]:
         n_pred = self._conn.execute("SELECT COUNT(*) AS c FROM predictions").fetchone()["c"]

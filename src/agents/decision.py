@@ -656,6 +656,55 @@ class DecisionResult(BaseModel):
         return self
 
 
+def _render_weight_priors_for_prompt(priors: dict | None) -> str:
+    """渲染历史权重校准 priors 为 Decision Agent 的 prompt 输入。
+
+    priors 来自 store.get_weight_calibration_priors(): 同行业历史 closed 项目的
+    PostmortemAgent 输出的 weight_calibrations 聚合.
+
+    样本不足或无 calibration 时返回空字符串 (不污染 prompt)。
+    """
+    if not priors:
+        return ""
+    n = priors.get("sample_size", 0)
+    cals = priors.get("calibrations") or []
+    min_required = priors.get("min_samples_required")
+    if not cals:
+        # 样本不足或无 calibration, 显式说明 (LLM 看到后知道是冷启动期)
+        if n > 0 and min_required:
+            return (
+                f"# 历史权重校准参考\n"
+                f"（同行业历史 closed 项目仅 {n} 个 < 最低门槛 {min_required}, "
+                f"暂无聚合校准, 按 STANDARD_DECISION_FACTORS 区间自定）\n\n"
+            )
+        return ""
+    # 渲染表格
+    lines = [
+        "# 历史权重校准参考 ⭐",
+        f"基于同行业 {n} 个已闭环的历史项目（PostmortemAgent 复盘后的"
+        f"权重调整建议聚合）, 以下因子在事后看通常被错误估权重. "
+        f"**这是软引导, 不是硬约束**——请参考但仍按本项目特征自定权重, 在 rationale "
+        f"中说明你为何采纳/偏离这些 prior:",
+        "",
+        "| 因子 | 历史平均偏差 (suggested - actual) | 样本数 | 偏差区间 | 典型理由 |",
+        "|---|---|---|---|---|",
+    ]
+    for c in cals[:10]:  # 最多展示 10 个
+        delta = c.get("avg_delta", 0)
+        delta_str = f"{delta:+.2%}" if delta else "0%"
+        n_samples = c.get("samples", 0)
+        rng = f"[{c.get('min_delta', 0):+.2%}, {c.get('max_delta', 0):+.2%}]"
+        rationale_examples = c.get("rationale_examples", []) or []
+        rationale_str = (rationale_examples[0][:80] + "…") if rationale_examples else "—"
+        direction = "应**上调**" if delta > 0 else ("应**下调**" if delta < 0 else "保持")
+        lines.append(
+            f"| {c.get('factor', '—')} | {delta_str} ({direction}) | "
+            f"{n_samples} | {rng} | {rationale_str} |"
+        )
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
 def _briefs_block(briefs: dict[str, str]) -> str:
     if not briefs:
         return "（无可用简报）"
@@ -703,12 +752,16 @@ class DecisionAgent(BaseAgent):
 
     def run(self, ctx: AgentContext) -> AgentReport:
         briefs_text = _briefs_block(ctx.briefs)
+        weight_priors_block = _render_weight_priors_for_prompt(
+            ctx.extras.weight_priors if hasattr(ctx.extras, "weight_priors") else {}
+        )
 
         user_msg = (
             f"# 待决策项目\n"
             f"- 公司：{ctx.company_name} ({ctx.ticker})\n"
             f"- 行业：{ctx.industry}\n"
             f"- 项目 ID：{ctx.project_id}\n\n"
+            f"{weight_priors_block}"
             f"# 各 Agent 简报\n\n{briefs_text}\n\n"
             f"请按系统指令的格式输出最终基石投资决策。"
         )
