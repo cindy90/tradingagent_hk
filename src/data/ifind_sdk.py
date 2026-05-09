@@ -22,26 +22,38 @@ import threading
 import time
 from typing import Any
 
-import pandas as pd
 from loguru import logger
 
 from config import get_settings
 
 
+_cache_conn: sqlite3.Connection | None = None
+_cache_conn_lock = threading.Lock()
+
+
 def _cache_db() -> sqlite3.Connection:
-    """SDK 专用缓存表。和 src.data.cache 共用同一个 sqlite 文件，但单独 prefix。"""
-    p = get_settings().cache_dir / "cache.sqlite"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(p, check_same_thread=False)
-    conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v BLOB, ts REAL)")
-    conn.commit()
-    return conn
+    """SDK 专用缓存表，单例连接（避免每次 SDK 调用都 open+close）。
+
+    单次 prefetch 涉及 ~4 次 SDK 调用 × N 个 peer → 之前每次都开新连接，
+    现在共享一个 connection 显著降低 IO。
+    """
+    global _cache_conn
+    if _cache_conn is not None:
+        return _cache_conn
+    with _cache_conn_lock:
+        if _cache_conn is not None:
+            return _cache_conn
+        p = get_settings().cache_dir / "cache.sqlite"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(p, check_same_thread=False)
+        conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v BLOB, ts REAL)")
+        conn.commit()
+        _cache_conn = conn
+        return conn
 
 
 def _cache_get(key: str, ttl_seconds: int) -> Any:
-    conn = _cache_db()
-    row = conn.execute("SELECT v, ts FROM kv WHERE k=?", (key,)).fetchone()
-    conn.close()
+    row = _cache_db().execute("SELECT v, ts FROM kv WHERE k=?", (key,)).fetchone()
     if row is None:
         return None
     v, ts = row
@@ -60,7 +72,6 @@ def _cache_set(key: str, value: Any) -> None:
         (key, pickle.dumps(value), time.time()),
     )
     conn.commit()
-    conn.close()
 
 
 def _cache_key(*parts: Any) -> str:
@@ -69,6 +80,10 @@ def _cache_key(*parts: Any) -> str:
 
 _login_lock = threading.Lock()
 _logged_in: bool = False
+# 把"未配置/未安装"提示从 warning 降到 info, 且全局只打印一次
+# (一次 prefetch 涉及十几次 SDK 调用, 每次都 warn 会刷屏)
+_unconfigured_warned: bool = False
+_sdk_missing_warned: bool = False
 
 
 def to_ths_hk_code(ticker: str) -> str:
@@ -112,8 +127,12 @@ def verify_company_name(thscode: str, expected_name: str) -> tuple[bool, str | N
 
 
 def _ensure_login() -> bool:
-    """惰性登录 iFinD; 全局单例, 多次调用安全。返回是否成功。"""
-    global _logged_in
+    """惰性登录 iFinD; 全局单例, 多次调用安全。返回是否成功。
+
+    "SDK 未安装" / "未配置账号" 这类预期跳过场景只 info-level 提示一次，
+    避免一次 prefetch 在日志里刷屏。
+    """
+    global _logged_in, _unconfigured_warned, _sdk_missing_warned
     if _logged_in:
         return True
     with _login_lock:
@@ -122,15 +141,21 @@ def _ensure_login() -> bool:
         try:
             from iFinDPy import THS_iFinDLogin
         except ImportError:
-            logger.warning(
-                "iFindPy SDK 未安装。THS_BD/THS_HQ/THS_DataPool 等接口不可用; "
-                "请用 installiFinDPy.py 装到当前 venv。"
-            )
+            if not _sdk_missing_warned:
+                logger.info(
+                    "iFindPy SDK 未安装, SDK 接口不可用 (REST 路径仍正常)。"
+                    "如需 peers 财务/估值数据, 请用 installiFinDPy.py 装到当前 venv。"
+                )
+                _sdk_missing_warned = True
             return False
-        user = os.environ.get("IFIND_USERNAME", "")
-        pwd = os.environ.get("IFIND_PASSWORD", "")
+        # 优先读 pydantic-settings (会从 .env 加载), 兜底回退 os.environ
+        s = get_settings()
+        user = s.ifind_username or os.environ.get("IFIND_USERNAME", "")
+        pwd = s.ifind_password or os.environ.get("IFIND_PASSWORD", "")
         if not user or not pwd:
-            logger.warning("IFIND_USERNAME / IFIND_PASSWORD 未配置, 跳过 SDK 登录")
+            if not _unconfigured_warned:
+                logger.info("IFIND_USERNAME / IFIND_PASSWORD 未配置, 跳过 SDK 登录")
+                _unconfigured_warned = True
             return False
         ret = THS_iFinDLogin(user, pwd)
         # 0 = 成功, -201 = 已登录(也算成功)
@@ -185,6 +210,7 @@ def get_basic_data(thscode: str, fields: str, params: str = "") -> dict[str, Any
         else:
             return {}
     row = r.data.iloc[0].to_dict()
+    import pandas as pd  # 局部 import：只有真调 SDK 才需要 pandas
     cleaned = {k: (None if pd.isna(v) else v) for k, v in row.items()}
     _cache_set(key, cleaned)
     return cleaned
@@ -193,10 +219,22 @@ def get_basic_data(thscode: str, fields: str, params: str = "") -> dict[str, Any
 def get_history_quotes(
     thscode: str,
     fields: str = "close,changeRatio,amount,turnoverRatio",
-    sdate: str = "2026-01-01",
-    edate: str = "2026-05-09",
+    sdate: str | None = None,
+    edate: str | None = None,
+    *,
+    days_back: int = 180,
 ) -> list[dict]:
-    """单股历史日 K (THS_HQ). catalog 验证: 第 3 个参数 jsonparam 留空字符串即可。"""
+    """单股历史日 K (THS_HQ). catalog 验证: 第 3 个参数 jsonparam 留空字符串即可。
+
+    sdate/edate 为 None 时:
+      edate = today
+      sdate = today - days_back 日历日 (默认 180 ~= 90 交易日 + buffer)
+    """
+    from datetime import date, timedelta
+    if edate is None:
+        edate = date.today().strftime("%Y-%m-%d")
+    if sdate is None:
+        sdate = (date.today() - timedelta(days=days_back)).strftime("%Y-%m-%d")
     key = _cache_key("HQ", thscode, fields, sdate, edate)
     cached = _cache_get(key, _HQ_TTL)
     if cached is not None:
@@ -297,12 +335,7 @@ def get_peer_valuation_multiples(ticker: str, date: str = "") -> dict[str, Any]:
     }
 
 
-def get_peer_fundamentals(ticker: str, year: int = 2025) -> dict[str, Any]:
-    """单股基本面 (THS_BD): 营收 / 净利润 / 毛利率 / 净利率 / ROE.
-
-    Args:
-        year: 报告期年份 (默认 2025); 港股年报通常 4-6 月披露。
-    """
+def _fundamentals_for_year(ticker: str, year: int) -> dict[str, Any]:
     code = to_ths_hk_code(ticker)
     eoy = f"{year}-12-31"
     fields = "total_oi;ni_attr_to_cs;gross_selling_rate;net_profit_margin_on_sales;ths_roe_hks"
@@ -318,6 +351,51 @@ def get_peer_fundamentals(ticker: str, year: int = 2025) -> dict[str, Any]:
         "net_margin": data.get("net_profit_margin_on_sales"),
         "roe": data.get("ths_roe_hks"),
     }
+
+
+def _default_target_fiscal_year() -> int:
+    """根据当前日期推算"应该已披露的最近完整年报"年份。
+
+    港股年报通常 4-6 月披露。简化规则:
+      7 月起 → 上一年（如 2026-07 → 2025 年报）
+      6 月底前 → 前年（如 2026-05 → 2024 年报，2025 多数还没发）
+    """
+    from datetime import date
+    today = date.today()
+    return today.year - 1 if today.month >= 7 else today.year - 2
+
+
+def get_peer_fundamentals(
+    ticker: str,
+    year: int | None = None,
+    *,
+    fallback_years: int = 1,
+) -> dict[str, Any]:
+    """单股基本面 (THS_BD): 营收 / 净利润 / 毛利率 / 净利率 / ROE.
+
+    Args:
+        year: 报告期年份。None 时按 _default_target_fiscal_year() 自动推算。
+        fallback_years: 主年份没数据时再回退几年（默认 1 = 再试一年）。
+
+    自动 fallback 逻辑：先试主年份，若 revenue / net_profit 都缺，则回退到前一年。
+    避免 5 月跑时 hardcoded year=2025 拿到全空。
+    """
+    if year is None:
+        year = _default_target_fiscal_year()
+
+    result = _fundamentals_for_year(ticker, year)
+    if result.get("revenue") is not None or result.get("net_profit") is not None:
+        return result
+    # 关键字段空 → 试更早年份
+    for delta in range(1, fallback_years + 1):
+        fallback_year = year - delta
+        logger.info(
+            f"[SDK] {ticker} {year} 年报数据缺失, fallback 到 {fallback_year}"
+        )
+        result = _fundamentals_for_year(ticker, fallback_year)
+        if result.get("revenue") is not None or result.get("net_profit") is not None:
+            return result
+    return result  # 仍然空就返空，让 caller 自行处理
 
 
 def get_peer_ipo_summary(ticker: str) -> dict[str, Any]:
