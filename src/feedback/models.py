@@ -120,6 +120,39 @@ class SentimentScoreCard(AgentScoreCard):
     market_attention_score: float = Field(ge=0, le=5)
 
 
+class ScarcityScoreCard(AgentScoreCard):
+    """稀缺性评分卡: 标的在港股同主题中的供给稀缺度。"""
+    scarcity_score: float = Field(
+        ge=1, le=5,
+        description="1=红海/烂大街 / 3=中性 / 5=独苗稀缺. LLM 在引擎 raw_scarcity_score 基础上微调",
+    )
+    listed_count_in_theme: int = Field(
+        default=0, description="同主题港股已上市公司数 (不含 target)",
+    )
+    market_cap_top3_share: float | None = Field(
+        default=None, ge=0, le=1, description="同主题 top 3 市值占比",
+    )
+    liquidity_thinning_ratio: float | None = Field(
+        default=None, ge=0, le=1,
+        description="同主题中 30 日均成交 < 5000 万 HKD 的公司占比",
+    )
+    recent_ipo_count_12m: int = Field(
+        default=0, description="过去 12 月同主题 IPO 数 (边际稀缺度)",
+    )
+    sentiment_linkage: Literal[
+        "稀缺+热情", "稀缺+冷淡", "拥挤+热情", "拥挤+冷淡", "中性",
+    ] = Field(
+        default="中性",
+        description="稀缺度 × 情绪联动. 稀缺+热情=溢价 / 稀缺+冷淡=错杀机会 / "
+                    "拥挤+热情=情绪轮动末端 / 拥挤+冷淡=最弱组合",
+    )
+    valuation_premium_view: Literal["允许溢价", "中性", "应折扣", "无明确观点"] = "中性"
+    differentiator: list[str] = Field(
+        default_factory=list,
+        description="即使同主题已有多家, target 的差异化点 (技术/规模/客户结构), 1-3 条",
+    )
+
+
 class RiskItem(BaseModel):
     """单维度风险的三维量化（概率 × 影响 × 预警信号）。"""
     model_config = ConfigDict(extra="ignore")
@@ -152,6 +185,7 @@ SCORE_CARD_CLASSES: dict[str, type[AgentScoreCard]] = {
     "comparable": ComparableScoreCard,
     "tech_trend": TechTrendScoreCard,
     "sentiment": SentimentScoreCard,
+    "scarcity": ScarcityScoreCard,
     "risk": RiskScoreCard,
 }
 

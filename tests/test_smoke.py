@@ -3042,6 +3042,170 @@ def test_comparable_agent_engine_anchor_no_inputs() -> None:
     assert "输入不足" in md
 
 
+# ============================================================================
+# ScarcityAgent: 稀缺性分析 (存量 v1)
+# ============================================================================
+
+def test_scarcity_stats_empty_peers() -> None:
+    """peer 为空时应返回'独苗'倾向 + 警告主题界定."""
+    from src.tools.scarcity import compute_scarcity_stats
+
+    stats = compute_scarcity_stats([], target_ticker="0000.HK")
+    assert stats.listed_count_in_theme == 0
+    assert stats.raw_scarcity_score >= 3.5  # 偏稀缺
+    assert any("peer 数为 0" in r for r in stats.rationale)
+
+
+def test_scarcity_stats_red_ocean() -> None:
+    """同主题 > 10 家 + 流动性枯竭 → 红海, 分数显著低于中性."""
+    from src.tools.scarcity import compute_scarcity_stats
+
+    peers = [
+        {"thscode": f"P{i}.HK", "name": f"P{i}", "market_cap_hkd_b": 30.0,
+         "avg_turnover_30d_hkd": 1e7, "ipo_date": "2020-01-01"}
+        for i in range(12)
+    ]
+    stats = compute_scarcity_stats(peers, target_ticker="X.HK")
+    assert stats.listed_count_in_theme == 12
+    # 12 家 + 流动性 100% 枯竭 → 应触发 -0.5 + -0.5
+    assert stats.raw_scarcity_score <= 2.5
+    assert stats.liquidity_thinning_ratio == 1.0
+
+
+def test_scarcity_stats_independent_player() -> None:
+    """同主题仅 2 家, 健康流动性 → 独苗, 高分."""
+    from src.tools.scarcity import compute_scarcity_stats
+
+    peers = [
+        {"thscode": "P1.HK", "name": "P1", "market_cap_hkd_b": 100.0,
+         "avg_turnover_30d_hkd": 2e8, "ipo_date": "2018-01-01"},
+        {"thscode": "P2.HK", "name": "P2", "market_cap_hkd_b": 80.0,
+         "avg_turnover_30d_hkd": 1.5e8, "ipo_date": "2019-01-01"},
+    ]
+    stats = compute_scarcity_stats(peers, target_ticker="X.HK")
+    assert stats.listed_count_in_theme == 2
+    assert stats.raw_scarcity_score >= 4.0  # 独苗 +1.5
+    assert stats.liquidity_thinning_ratio == 0.0
+
+
+def test_scarcity_stats_recent_ipo_density_minus() -> None:
+    """过去 12 月已 IPO ≥ 3 家应触发 -0.5 边际稀缺递减."""
+    from datetime import date, timedelta
+    from src.tools.scarcity import compute_scarcity_stats
+
+    today = date.today()
+    recent_iso = (today - timedelta(days=60)).isoformat()
+    peers = [
+        {"thscode": f"P{i}.HK", "name": f"P{i}", "market_cap_hkd_b": 50.0,
+         "avg_turnover_30d_hkd": 2e8, "ipo_date": recent_iso}
+        for i in range(4)
+    ]
+    stats = compute_scarcity_stats(peers, target_ticker="X.HK", today=today)
+    assert stats.recent_ipo_count_12m == 4
+    assert any("过去 12 月" in r for r in stats.rationale)
+
+
+def test_scarcity_stats_excludes_target() -> None:
+    """target_ticker 应从 peers 排除."""
+    from src.tools.scarcity import compute_scarcity_stats
+
+    peers = [
+        {"thscode": "X.HK", "name": "self"},
+        {"thscode": "P1.HK", "name": "P1", "market_cap_hkd_b": 50.0},
+    ]
+    stats = compute_scarcity_stats(peers, target_ticker="X.HK")
+    assert stats.listed_count_in_theme == 1
+
+
+def test_scarcity_render_stats_for_prompt() -> None:
+    """render 应包含核心指标 + 引擎打分."""
+    from src.tools.scarcity import compute_scarcity_stats, render_stats_for_prompt
+
+    peers = [
+        {"thscode": "P1.HK", "name": "P1", "market_cap_hkd_b": 50.0,
+         "avg_turnover_30d_hkd": 1e8, "ipo_date": "2018-01-01"},
+    ]
+    stats = compute_scarcity_stats(peers, target_ticker="X.HK")
+    md = render_stats_for_prompt(stats)
+    assert "同主题已上市公司数" in md
+    assert "引擎初算稀缺度" in md
+    assert str(stats.raw_scarcity_score) in md
+
+
+def test_scarcity_score_card_schema() -> None:
+    """ScarcityScoreCard 必填字段 + 联动枚举."""
+    from src.feedback.models import ScarcityScoreCard
+
+    card = ScarcityScoreCard(
+        summary="独苗赛道 + 板块情绪温和", overall_score=4.0,
+        scarcity_score=4.5, listed_count_in_theme=2,
+        sentiment_linkage="稀缺+热情",
+        valuation_premium_view="允许溢价",
+        differentiator=["7 轴关节力控精度全球第一"],
+    )
+    assert card.scarcity_score == 4.5
+    assert card.sentiment_linkage == "稀缺+热情"
+    assert card.differentiator == ["7 轴关节力控精度全球第一"]
+
+
+def test_scarcity_score_card_invalid_linkage_raises() -> None:
+    """sentiment_linkage 必须是枚举值."""
+    import pytest
+    from pydantic import ValidationError
+    from src.feedback.models import ScarcityScoreCard
+
+    with pytest.raises(ValidationError):
+        ScarcityScoreCard(
+            summary="x", overall_score=3.0, scarcity_score=3.0,
+            sentiment_linkage="瞎填",  # type: ignore
+        )
+
+
+def test_scarcity_agent_prompt_builds(monkeypatch) -> None:
+    """ScarcityAgent.build_user_message 应注入引擎统计 + 上游简报."""
+    from src.agents.base import AgentContext
+    from src.agents.extras import WorkflowExtras
+    from src.agents.scarcity import ScarcityAgent
+    from src.agents.summarizer import Summarizer
+
+    class _NullLLM:
+        def complete(self, *a, **kw):
+            class R:
+                text = ""
+            return R()
+
+    extras = WorkflowExtras()
+    extras.peers = [
+        {"thscode": "P1.HK", "name": "P1", "market_cap_hkd_b": 50.0,
+         "avg_turnover_30d_hkd": 1e8, "ipo_date": "2018-01-01"},
+    ]
+    ctx = AgentContext(
+        project_id="sc1", ticker="X.HK", company_name="Target",
+        industry="工业机器人", reports_dir=None, rag=None, extras=extras,
+    )
+    ctx.briefs["prospectus_analyst"] = "招股书摘要 ..."
+    ctx.briefs["comparable"] = "comparable peer PS 中位 22x"
+
+    agent = ScarcityAgent(_NullLLM(), Summarizer(_NullLLM()))
+    msg = agent.build_user_message(ctx)
+    assert "引擎确定性稀缺度统计" in msg
+    assert "同主题已上市港股 peer" in msg
+    assert "comparable peer PS 中位 22x" in msg
+    # 应写入 ctx.extras.misc["engine_scarcity"]
+    assert "engine_scarcity" in extras.misc
+    assert extras.misc["engine_scarcity"]["listed_count_in_theme"] == 1
+
+
+def test_scarcity_agent_in_workflow_steps() -> None:
+    """ScarcityAgent 必须在 SentimentAgent 之前 (情绪 brief 联动需要)."""
+    src_lines = open("src/graph/workflow.py", encoding="utf-8").read()
+    assert '"scarcity": ScarcityAgent' in src_lines
+    # steps list 中 scarcity 应该在 sentiment 之前
+    sc_pos = src_lines.find("ScarcityAgent(self.llm, self.summarizer)")
+    sn_pos = src_lines.find("SentimentAgent(self.llm, self.summarizer)")
+    assert 0 < sc_pos < sn_pos
+
+
 def test_decision_engine_sensitivity_in_extras() -> None:
     """DecisionAgent 应在成功后把引擎敏感性写入 ctx.extras.misc['engine_sensitivity']."""
     # 直接验证 sensitivity_engine 工作 (不跑整个 LLM agent)

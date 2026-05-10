@@ -461,9 +461,12 @@ STANDARD_DECISION_FACTORS: list[dict[str, Any]] = [
     {
         "factor": "估值合理性",
         "suggested_weight_range": (0.20, 0.35),
-        "source_agents": ["comparable"],
+        "source_agents": ["comparable", "scarcity"],
         "guidance": "港股 IPO 破发率高, 估值是首要约束. 估值偏高时该因子分数应低; "
-                    "估值偏低时分数高. 即使其他因子优秀, 估值过高仍应限制权重.",
+                    "估值偏低时分数高. 即使其他因子优秀, 估值过高仍应限制权重. "
+                    "**ScarcityAgent 的稀缺度评分作为估值合理性的修正项**: "
+                    "scarcity_score ≥ 4 (稀缺) 允许 PS 中位 + 10-20% 溢价; "
+                    "scarcity_score ≤ 2 (拥挤) 应在 PS 中位上压 10%+ 折扣.",
     },
     {
         "factor": "风控等级",

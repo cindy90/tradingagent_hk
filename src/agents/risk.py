@@ -109,7 +109,7 @@ class RiskAgent(TemplateAgent):
     def build_user_message(self, ctx: AgentContext) -> str:
         upstream = [
             "prospectus_analyst", "industry", "macro", "comparable",
-            "tech_trend", "sentiment", "fact_check", "debate_manager",
+            "tech_trend", "scarcity", "sentiment", "fact_check", "debate_manager",
         ]
         profile_block = ""
         try:

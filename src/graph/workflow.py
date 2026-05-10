@@ -28,6 +28,7 @@ from src.agents.debate import DebateOrchestrator
 from src.agents.decision import DecisionAgent
 from src.agents.industry import IndustryAgent
 from src.agents.macro import MacroAgent
+from src.agents.scarcity import ScarcityAgent
 from src.agents.prospectus_analyst import ProspectusAnalystAgent
 from src.agents.risk import RiskAgent
 from src.agents.sentiment import SentimentAgent
@@ -533,6 +534,7 @@ def rerun_steps(
             "macro": MacroAgent,
             "comparable": ComparableAgent,
             "tech_trend": TechTrendAgent,
+            "scarcity": ScarcityAgent,
             "sentiment": SentimentAgent,
             "fact_check": FactCheckerAgent,
             "risk": RiskAgent,
@@ -691,6 +693,7 @@ class CornerstoneWorkflow:
             MacroAgent(self.llm, self.summarizer),
             ComparableAgent(self.llm, self.summarizer),
             TechTrendAgent(self.llm, self.summarizer),
+            ScarcityAgent(self.llm, self.summarizer),
             SentimentAgent(self.llm, self.summarizer),
             FactCheckerAgent(self.llm),  # ⭐ 新增: 跨 Agent 数字交叉核对
             DebateOrchestrator(self.llm, max_rounds=max_rounds),

@@ -206,8 +206,13 @@ class SentimentAgent(TemplateAgent):
         peer_anns_md = _render_peer_announcements(ctx.extras.peer_announcements)
         roadshow_md = _render_roadshow_signals(ctx.extras.roadshow_signals)
         competing_md = _render_competing_ipos(ctx.extras.competing_ipos)
+
+        # 稀缺性 brief (来自 ScarcityAgent, 上游运行已写入 ctx.briefs)
+        scarcity_brief = ctx.briefs.get("scarcity") or "（未运行 ScarcityAgent 或无产出）"
         return (
             f"# 项目\n{ctx.company_name} ({ctx.ticker})  行业: {ctx.industry}\n\n"
+            f"# 上游稀缺性判断 (来自 ScarcityAgent — 用于'稀缺×情绪'联动判断)\n"
+            f"{scarcity_brief}\n\n"
             f"# 可比公司 IPO 信息（来自 iFinD THS_BD）\n{peers_info_md}\n\n"
             f"# 可比公司近期行情（来自 iFinD THS_HQ，最新交易日数据）\n{peers_quotes_md}\n\n"
             f"# 可比公司近 180 天关键公告事件（来自 iFinD report_query）\n{peer_anns_md}\n\n"
@@ -217,4 +222,6 @@ class SentimentAgent(TemplateAgent):
             f"# 港股通南向资金（来自 iFinD EDB, 全市场口径）\n{southbound_md}\n\n"
             f"请输出情绪分析。第一节'板块近期情绪'必须引用上方南向资金数据"
             f"（如近 7 日净流入趋势 / 7 日均值 vs 最新一日对比 / 累计净流入变动）, 不要写'未提供'。"
+            f"\n\n**稀缺×情绪联动**: 如 ScarcityAgent 给出'稀缺+热情', 你需要在第八节"
+            f"'对基石认购的情绪面判断'里说明溢价空间; 若'拥挤+冷淡', 必须明确转向负面。"
         )
