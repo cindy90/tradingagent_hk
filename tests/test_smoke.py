@@ -3999,6 +3999,222 @@ def test_cornerstone_in_workflow_registry() -> None:
     assert 0 < pos_p < pos_c < pos_i
 
 
+# ============================================================================
+# T2.5: hkquant 导出器 (Prediction + Outcome → hkquant 兼容 SQLite)
+# ============================================================================
+
+def _make_pred_for_export(**overrides):
+    """构造测试用 Prediction."""
+    from datetime import datetime
+    from src.feedback.models import Prediction
+    base = dict(
+        project_id="proj_test_001", ticker="9999.HK",
+        company_name="测试公司",
+        industry="Robotics", decision_date=datetime(2026, 1, 15),
+        recommendation="认购", confidence="中",
+        valuation_low=10.0, valuation_mid=12.0, valuation_high=14.0,
+        anchor_method="DCF", ipo_pricing_view="区间偏高",
+        suggested_amount_low_usd_m=5.0, suggested_amount_high_usd_m=10.0,
+        listing_chapter="18C", industry_theme="Robotics_Automation",
+        model_provider="anthropic",
+    )
+    base.update(overrides)
+    return Prediction(**base)
+
+
+def _make_outcome_for_export(**overrides):
+    from datetime import datetime, date
+    from src.feedback.models import Outcome
+    base = dict(
+        prediction_id=1, recorded_date=datetime(2026, 8, 15),
+        ipo_actual_price_hkd=11.5,
+        final_listing_date=date(2026, 2, 28),
+        d1_return=0.08, d30_return=0.12, d180_return=-0.05, d365_return=0.10,
+        was_broken_ipo_d1=False, max_drawdown_in_lockup_pct=-0.18,
+        avg_daily_turnover_hkd_m_d180=85.0,
+        cornerstone_actual_amount_usd_million=50.0,
+    )
+    base.update(overrides)
+    return Outcome(**base)
+
+
+def test_export_chapter_map_translates_known_values() -> None:
+    """Main_Board_Standard / 18A / 18C / GEM / Unknown 都映射正确."""
+    from src.feedback.hkquant_export import map_chapter
+    assert map_chapter("Main_Board_Standard") == "Main"
+    assert map_chapter("18A") == "18A"
+    assert map_chapter("18C") == "18C"
+    assert map_chapter("GEM") == "GEM"
+    assert map_chapter("Unknown") == "Main"
+    assert map_chapter(None) == "Main"
+    assert map_chapter("Wonky_Custom") == "Main"  # 未知值兜底
+
+
+def test_export_industry_theme_to_gics_picks_first_candidate() -> None:
+    """industry_theme → GICS L2 取候选第一个."""
+    from src.feedback.hkquant_export import map_industry_theme_to_gics_l2
+    assert map_industry_theme_to_gics_l2("Bio_Pharma") == \
+        "Pharmaceuticals, Biotechnology & Life Sciences"
+    assert map_industry_theme_to_gics_l2("Robotics_Automation") == "Capital Goods"
+    assert map_industry_theme_to_gics_l2("Other") is None
+    assert map_industry_theme_to_gics_l2(None) is None
+
+
+def test_to_ipo_master_row_full_mapping() -> None:
+    """完整 Prediction + Outcome → ipo_master row 关键字段验证."""
+    from src.feedback.hkquant_export import to_ipo_master_row
+    p = _make_pred_for_export()
+    o = _make_outcome_for_export()
+    row = to_ipo_master_row(p, o)
+    assert row is not None
+    assert row["ipo_id"] == "proj_test_001"
+    assert row["stock_code"] == "9999.HK"
+    assert row["listing_date"] == "2026-02-28"
+    assert row["listing_chapter"] == "18C"
+    assert row["gics_l2"] == "Capital Goods"
+    assert row["offer_price_hkd"] == 11.5
+    # cornerstone: 50M USD × 7.8 × 1e6 = 3.9e8 HKD
+    assert abs(row["cornerstone_total_hkd"] - 3.9e8) < 1
+    assert row["lockup_months"] == 6
+    assert row["data_quality_score"] == 0.7
+    assert "tradingagent_hk export" in row["data_source_notes"]
+
+
+def test_to_ipo_master_row_no_outcome_returns_none() -> None:
+    """无 outcome / 无 listing_date → None (跳过)."""
+    from src.feedback.hkquant_export import to_ipo_master_row
+    p = _make_pred_for_export()
+    assert to_ipo_master_row(p, None) is None
+    o = _make_outcome_for_export(final_listing_date=None)
+    assert to_ipo_master_row(p, o) is None
+
+
+def test_to_ipo_returns_row_full() -> None:
+    """完整 Outcome → ipo_returns row."""
+    from src.feedback.hkquant_export import to_ipo_returns_row
+    p = _make_pred_for_export()
+    o = _make_outcome_for_export()
+    row = to_ipo_returns_row(p, o)
+    assert row is not None
+    assert row["ipo_id"] == "proj_test_001"
+    assert row["return_d1_close"] == 0.08
+    assert row["return_d30"] == 0.12
+    assert row["return_m6"] == -0.05    # d180 → m6
+    assert row["return_m12"] == 0.10    # d365 → m12
+    assert row["max_drawdown_m6"] == -0.18
+    # 85 M HKD × 1e6 = 8.5e7 HKD
+    assert row["avg_daily_volume_hkd"] == 8.5e7
+
+
+def test_to_ipo_returns_row_all_none_returns_none() -> None:
+    """所有 horizon 都 None → 跳过."""
+    from src.feedback.hkquant_export import to_ipo_returns_row
+    p = _make_pred_for_export()
+    o = _make_outcome_for_export(
+        d1_return=None, d30_return=None,
+        d180_return=None, d365_return=None,
+    )
+    assert to_ipo_returns_row(p, o) is None
+
+
+def test_export_to_hkquant_sqlite_roundtrip(tmp_path) -> None:
+    """端到端: 落库 prediction + outcome → 导出 → 读出来字段一致."""
+    import sqlite3
+    from src.feedback.hkquant_export import export_to_hkquant_sqlite
+    from src.feedback.store import FeedbackStore
+
+    fb = FeedbackStore(db_path=str(tmp_path / "feedback.sqlite"))
+    pred = _make_pred_for_export(project_id="proj_e2e_001")
+    pid = fb.save_prediction(pred)
+    fb.update_status(pid, "closed")
+    out = _make_outcome_for_export(prediction_id=pid)
+    fb.record_outcome(out)
+
+    out_db = tmp_path / "exported.db"
+    stats = export_to_hkquant_sqlite(out_db, feedback_store=fb)
+    assert stats.predictions_scanned == 1
+    assert stats.rows_master_written == 1
+    assert stats.rows_returns_written == 1
+
+    conn = sqlite3.connect(str(out_db))
+    conn.row_factory = sqlite3.Row
+    m = conn.execute("SELECT * FROM ipo_master").fetchone()
+    r = conn.execute("SELECT * FROM ipo_returns").fetchone()
+    conn.close()
+    fb.close()
+
+    assert m["ipo_id"] == "proj_e2e_001"
+    assert m["listing_chapter"] == "18C"
+    assert m["gics_l2"] == "Capital Goods"
+    assert r["return_d1_close"] == 0.08
+    assert r["return_m6"] == -0.05
+
+
+def test_export_skips_predictions_without_outcome(tmp_path) -> None:
+    """有 prediction 但无 outcome → 跳过, 计数正确."""
+    from src.feedback.hkquant_export import export_to_hkquant_sqlite
+    from src.feedback.store import FeedbackStore
+
+    fb = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    p = _make_pred_for_export(project_id="proj_no_outcome")
+    pid = fb.save_prediction(p)
+    fb.update_status(pid, "closed")
+    # 故意不 record_outcome
+
+    stats = export_to_hkquant_sqlite(
+        tmp_path / "out.db", feedback_store=fb,
+    )
+    assert stats.predictions_scanned == 1
+    assert stats.rows_master_written == 0
+    assert stats.skipped_no_outcome == 1
+    fb.close()
+
+
+def test_export_only_closed_filter(tmp_path) -> None:
+    """only_closed=True (默认) 不导出 status='open' 的项目."""
+    from src.feedback.hkquant_export import export_to_hkquant_sqlite
+    from src.feedback.store import FeedbackStore
+
+    fb = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    p_open = _make_pred_for_export(project_id="proj_open")
+    pid_open = fb.save_prediction(p_open)
+    # 不调 update_status, 保持默认 'open'
+    fb.record_outcome(_make_outcome_for_export(prediction_id=pid_open))
+
+    p_closed = _make_pred_for_export(project_id="proj_closed", ticker="8888.HK")
+    pid_closed = fb.save_prediction(p_closed)
+    fb.update_status(pid_closed, "closed")
+    fb.record_outcome(_make_outcome_for_export(prediction_id=pid_closed))
+
+    # 默认 only_closed=True → 仅 closed
+    stats = export_to_hkquant_sqlite(tmp_path / "closed.db", feedback_store=fb)
+    assert stats.predictions_scanned == 1
+    assert stats.rows_master_written == 1
+
+    # only_closed=False → 两个都导出
+    stats2 = export_to_hkquant_sqlite(
+        tmp_path / "all.db", feedback_store=fb, only_closed=False,
+    )
+    assert stats2.predictions_scanned == 2
+    assert stats2.rows_master_written == 2
+    fb.close()
+
+
+def test_export_cli_smoke(tmp_path, capsys) -> None:
+    """CLI: --out + 退出码 0 + 输出含 hkquant merge 提示."""
+    from src.feedback.hkquant_export import main
+    from src.feedback.store import FeedbackStore
+
+    # 建一个空的 feedback store (用 monkeypatch 的方式 — 此处用 default).
+    # 简单起见: 跑 CLI 在空 default DB 上, 应导出 0 行不抛.
+    out_db = tmp_path / "cli_out.db"
+    rc = main(["--out", str(out_db)])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "扫" in captured.out
+    assert "hkquant" in captured.out.lower() or "INSERT OR IGNORE" in captured.out
+
+
 def test_feedback_store_theme_cache_ttl(tmp_path) -> None:
     """缓存超过 TTL 应失效返 None."""
     from datetime import datetime, timedelta
