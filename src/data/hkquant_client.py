@@ -390,6 +390,58 @@ def render_market_env_md(env: HKMarketEnv) -> str:
 
 
 # ============================================================================
+# 查询: 单标的 lookup (T4 自动 outcome 用)
+# ============================================================================
+
+def get_ipo_master_by_stock_code(
+    stock_code: str,
+    *,
+    db_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """按 stock_code 严格查 ipo_master 单行; 未命中返 {}.
+
+    严格匹配 (不做模糊) 是为了 T4 自动 outcome — 不能把 A 公司的回报错算给 B.
+    多家同 stock_code (理论上不应发生) 取最早 listing_date.
+    """
+    if not is_available() and db_path is None:
+        return {}
+    if not stock_code:
+        return {}
+    sql = (
+        "SELECT * FROM ipo_master WHERE stock_code = ? "
+        "ORDER BY listing_date ASC LIMIT 1"
+    )
+    try:
+        with _connect(db_path) as conn:
+            row = conn.execute(sql, (stock_code,)).fetchone()
+            return dict(row) if row else {}
+    except (sqlite3.Error, FileNotFoundError) as e:
+        logger.warning(f"[hkquant] get_ipo_master_by_stock_code 失败: {e}")
+        return {}
+
+
+def get_ipo_returns_by_ipo_id(
+    ipo_id: str,
+    *,
+    db_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """按 ipo_id 查 ipo_returns 单行; 未命中返 {}."""
+    if not is_available() and db_path is None:
+        return {}
+    if not ipo_id:
+        return {}
+    try:
+        with _connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM ipo_returns WHERE ipo_id = ?", (ipo_id,),
+            ).fetchone()
+            return dict(row) if row else {}
+    except (sqlite3.Error, FileNotFoundError) as e:
+        logger.warning(f"[hkquant] get_ipo_returns_by_ipo_id 失败: {e}")
+        return {}
+
+
+# ============================================================================
 # helpers
 # ============================================================================
 

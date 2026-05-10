@@ -4215,6 +4215,410 @@ def test_export_cli_smoke(tmp_path, capsys) -> None:
     assert "hkquant" in captured.out.lower() or "INSERT OR IGNORE" in captured.out
 
 
+# ============================================================================
+# T4: 自动 outcome — 从 hkquant.ipo_returns 反向给本项目 prediction 落 outcome
+# ============================================================================
+
+def _build_hkquant_outcome_fixture(tmp_path):
+    """建一个含 ipo_master + ipo_returns 数据的 hkquant fixture DB."""
+    import sqlite3
+    db_path = tmp_path / "nacs_t4.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE ipo_master (
+            ipo_id TEXT PRIMARY KEY, stock_code TEXT NOT NULL,
+            company_name_zh TEXT, company_name_en TEXT,
+            listing_date DATE NOT NULL, listing_chapter TEXT NOT NULL,
+            gics_l2 TEXT, offer_price_hkd REAL, offering_size_hkd REAL,
+            is_delisted INTEGER DEFAULT 0
+        );
+        CREATE TABLE ipo_returns (
+            ipo_id TEXT PRIMARY KEY,
+            return_d1_close REAL, return_d30 REAL, return_m3 REAL,
+            return_m6 REAL, return_m12 REAL,
+            return_unlock_d30 REAL, return_unlock_d90 REAL,
+            max_drawdown_m6 REAL, avg_daily_volume_hkd REAL
+        );
+    """)
+    conn.executemany(
+        "INSERT INTO ipo_master (ipo_id, stock_code, company_name_zh, "
+        "listing_date, listing_chapter, gics_l2, offer_price_hkd) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("ipo_winner", "9999.HK", "赢家公司", "2026-02-28", "18C",
+             "Capital Goods", 11.5),
+            ("ipo_loser", "8888.HK", "破发公司", "2025-12-15", "Main",
+             "Software & Services", 50.0),
+            ("ipo_no_returns", "7777.HK", "无回报数据公司", "2026-04-01",
+             "18A", "Pharmaceuticals", 30.0),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO ipo_returns (ipo_id, return_d1_close, return_d30, "
+        "return_m6, return_m12, max_drawdown_m6, avg_daily_volume_hkd) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("ipo_winner", 0.08, 0.12, -0.05, 0.10, -0.18, 8.5e7),
+            ("ipo_loser", -0.10, -0.20, -0.35, -0.40, -0.55, 1.2e7),
+            # ipo_no_returns 故意不插 ipo_returns
+        ],
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_t4_get_ipo_master_by_stock_code_strict_match(tmp_path) -> None:
+    """严格 stock_code 匹配; 不命中返 {}."""
+    from src.data import hkquant_client
+    db = _build_hkquant_outcome_fixture(tmp_path)
+    m = hkquant_client.get_ipo_master_by_stock_code("9999.HK", db_path=db)
+    assert m["ipo_id"] == "ipo_winner"
+    assert m["offer_price_hkd"] == 11.5
+    # 不命中
+    assert hkquant_client.get_ipo_master_by_stock_code(
+        "0000.HK", db_path=db,
+    ) == {}
+    # 空字符串
+    assert hkquant_client.get_ipo_master_by_stock_code("", db_path=db) == {}
+
+
+def test_t4_get_ipo_returns_by_ipo_id(tmp_path) -> None:
+    """ipo_id 查 returns; 缺失返 {}."""
+    from src.data import hkquant_client
+    db = _build_hkquant_outcome_fixture(tmp_path)
+    r = hkquant_client.get_ipo_returns_by_ipo_id("ipo_winner", db_path=db)
+    assert r["return_d1_close"] == 0.08
+    assert r["max_drawdown_m6"] == -0.18
+    # 没 returns 行
+    assert hkquant_client.get_ipo_returns_by_ipo_id(
+        "ipo_no_returns", db_path=db,
+    ) == {}
+
+
+def test_t4_derive_was_broken_ipo() -> None:
+    """破发派生: d1/d30/d180 任一 < 0 → broken_d180."""
+    from src.feedback.auto_outcome import derive_was_broken_ipo
+    # 全部为正
+    assert derive_was_broken_ipo(0.05, 0.10, 0.20) == (False, False)
+    # d1 破发, d180 回正
+    assert derive_was_broken_ipo(-0.02, 0.05, 0.10) == (True, True)
+    # d1 正但 d180 破发
+    assert derive_was_broken_ipo(0.05, 0.02, -0.10) == (False, True)
+    # d1 None
+    assert derive_was_broken_ipo(None, 0.10, 0.20) == (None, False)
+    # d180 None — 但 d30 < 0 时给保守估计 True
+    assert derive_was_broken_ipo(0.05, -0.02, None) == (False, True)
+    # 全 None
+    assert derive_was_broken_ipo(None, None, None) == (None, None)
+
+
+def test_t4_build_outcome_from_hkquant_full() -> None:
+    """完整 master+returns → Outcome 字段映射正确."""
+    from src.feedback.auto_outcome import build_outcome_from_hkquant
+    master = {
+        "ipo_id": "ipo_winner", "listing_date": "2026-02-28",
+        "offer_price_hkd": 11.5,
+    }
+    returns = {
+        "return_d1_close": 0.08, "return_d30": 0.12,
+        "return_m6": -0.05, "return_m12": 0.10,
+        "max_drawdown_m6": -0.18, "avg_daily_volume_hkd": 8.5e7,
+    }
+    o = build_outcome_from_hkquant(42, master, returns)
+    assert o is not None
+    assert o.prediction_id == 42
+    from datetime import date
+    assert o.final_listing_date == date(2026, 2, 28)
+    assert o.ipo_actual_price_hkd == 11.5
+    assert o.d1_return == 0.08
+    assert o.d180_return == -0.05
+    assert o.d365_return == 0.10
+    assert o.was_broken_ipo_d1 is False
+    assert o.was_broken_ipo_d180 is True   # m6 = -0.05
+    assert o.max_drawdown_in_lockup_pct == -0.18
+    assert o.avg_daily_turnover_hkd_m_d180 == 85.0
+    assert "auto_outcome" in o.user_notes
+
+
+def test_t4_build_outcome_no_listing_date_returns_none() -> None:
+    """master 缺 listing_date → None."""
+    from src.feedback.auto_outcome import build_outcome_from_hkquant
+    o = build_outcome_from_hkquant(1, {"ipo_id": "x"}, {})
+    assert o is None
+    o = build_outcome_from_hkquant(1, {}, {"return_d1_close": 0.1})
+    assert o is None
+
+
+def test_t4_build_outcome_partial_returns() -> None:
+    """没有 ipo_returns 行 (只有 listing_date) → 仍能拼 Outcome (horizon 全 None)."""
+    from src.feedback.auto_outcome import build_outcome_from_hkquant
+    master = {"listing_date": "2026-04-01", "offer_price_hkd": 30.0}
+    o = build_outcome_from_hkquant(1, master, {})
+    assert o is not None
+    assert o.d1_return is None
+    assert o.was_broken_ipo_d1 is None  # None 输入 → None 输出
+
+
+def test_t4_is_outcome_more_complete() -> None:
+    """更新策略: hkquant 拿到了更长 horizon 才视为更新."""
+    from datetime import date, datetime
+    from src.feedback.auto_outcome import is_outcome_more_complete
+    from src.feedback.models import Outcome
+
+    base = dict(
+        prediction_id=1, recorded_date=datetime(2026, 8, 1),
+        final_listing_date=date(2026, 2, 28),
+    )
+    # 新有 d365, 旧只有 d180
+    new = Outcome(**base, d1_return=0.08, d30_return=0.12,
+                  d180_return=-0.05, d365_return=0.10)
+    old = Outcome(**base, d1_return=0.08, d30_return=0.12, d180_return=-0.05)
+    assert is_outcome_more_complete(new, old) is True
+    # 反过来不更新
+    assert is_outcome_more_complete(old, new) is False
+    # 没有旧 outcome → 一定写
+    assert is_outcome_more_complete(new, None) is True
+    # 完全相同 → 不更新
+    assert is_outcome_more_complete(new, new) is False
+
+
+def test_t4_auto_record_outcome_dry_run_no_write(tmp_path) -> None:
+    """dry_run=True (默认) 不写库, 但返回 Action.would_write_outcome=True."""
+    from src.feedback.auto_outcome import auto_record_outcome_for_prediction
+    from src.feedback.store import FeedbackStore
+
+    db = _build_hkquant_outcome_fixture(tmp_path)
+    fb = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    p = _make_pred_for_export(project_id="proj_t4_dry", ticker="9999.HK")
+    fb.save_prediction(p)
+
+    a = auto_record_outcome_for_prediction(
+        p, store=fb, db_path=db, dry_run=True,
+    )
+    assert a.matched_in_hkquant is True
+    assert a.would_write_outcome is True
+    assert a.would_close_status is False  # auto_close=False
+    # latest_outcome 仍为 None (dry-run 不写)
+    pid_row = fb._conn.execute(
+        "SELECT id FROM predictions WHERE project_id = ?",
+        ("proj_t4_dry",),
+    ).fetchone()
+    assert fb.latest_outcome(int(pid_row["id"])) is None
+    fb.close()
+
+
+def test_t4_auto_record_outcome_apply_writes(tmp_path) -> None:
+    """dry_run=False 实际写库."""
+    from src.feedback.auto_outcome import auto_record_outcome_for_prediction
+    from src.feedback.store import FeedbackStore
+
+    db = _build_hkquant_outcome_fixture(tmp_path)
+    fb = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    p = _make_pred_for_export(project_id="proj_t4_apply", ticker="9999.HK")
+    fb.save_prediction(p)
+
+    a = auto_record_outcome_for_prediction(
+        p, store=fb, db_path=db, dry_run=False,
+    )
+    assert a.would_write_outcome is True
+    pid_row = fb._conn.execute(
+        "SELECT id, status FROM predictions WHERE project_id = ?",
+        ("proj_t4_apply",),
+    ).fetchone()
+    pid = int(pid_row["id"])
+    o = fb.latest_outcome(pid)
+    assert o is not None
+    assert o.d1_return == 0.08
+    assert o.d180_return == -0.05
+    # auto_close=False → status 不变
+    assert pid_row["status"] != "closed"
+    fb.close()
+
+
+def test_t4_auto_record_outcome_auto_close(tmp_path) -> None:
+    """auto_close=True + 有 M6 数据 → status 迁移到 closed."""
+    from src.feedback.auto_outcome import auto_record_outcome_for_prediction
+    from src.feedback.store import FeedbackStore
+
+    db = _build_hkquant_outcome_fixture(tmp_path)
+    fb = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    p = _make_pred_for_export(project_id="proj_t4_close", ticker="9999.HK")
+    fb.save_prediction(p)
+
+    a = auto_record_outcome_for_prediction(
+        p, store=fb, db_path=db, dry_run=False, auto_close=True,
+    )
+    assert a.would_close_status is True
+    row = fb._conn.execute(
+        "SELECT status FROM predictions WHERE project_id = ?",
+        ("proj_t4_close",),
+    ).fetchone()
+    assert row["status"] == "closed"
+    fb.close()
+
+
+def test_t4_auto_record_skips_when_no_match(tmp_path) -> None:
+    """ticker 在 hkquant 找不到 → matched=False, 不写, 给 skip_reason."""
+    from src.feedback.auto_outcome import auto_record_outcome_for_prediction
+    from src.feedback.store import FeedbackStore
+
+    db = _build_hkquant_outcome_fixture(tmp_path)
+    fb = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    p = _make_pred_for_export(project_id="proj_t4_miss", ticker="0000.HK")
+    fb.save_prediction(p)
+
+    a = auto_record_outcome_for_prediction(
+        p, store=fb, db_path=db, dry_run=False,
+    )
+    assert a.matched_in_hkquant is False
+    assert a.would_write_outcome is False
+    assert "0000.HK" in a.skip_reason
+    fb.close()
+
+
+def test_t4_auto_record_skips_when_no_new_data(tmp_path) -> None:
+    """已有更全的 outcome → 跳过."""
+    from src.feedback.auto_outcome import auto_record_outcome_for_prediction
+    from src.feedback.store import FeedbackStore
+
+    db = _build_hkquant_outcome_fixture(tmp_path)
+    fb = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    p = _make_pred_for_export(project_id="proj_t4_dup", ticker="9999.HK")
+    pid = fb.save_prediction(p)
+    # 预先落一个含全部 horizon 的 outcome
+    o = _make_outcome_for_export(prediction_id=pid)
+    fb.record_outcome(o)
+
+    a = auto_record_outcome_for_prediction(
+        p, store=fb, db_path=db, dry_run=False,
+    )
+    assert a.matched_in_hkquant is True
+    assert a.would_write_outcome is False
+    assert "无新增 horizon" in a.skip_reason
+    fb.close()
+
+
+def test_t4_auto_record_skips_when_listing_date_missing(tmp_path) -> None:
+    """hkquant 命中但 master.listing_date NULL → 不能拼 Outcome."""
+    import sqlite3
+    from src.feedback.auto_outcome import auto_record_outcome_for_prediction
+    from src.feedback.store import FeedbackStore
+
+    db_path = tmp_path / "nacs_no_date.db"
+    c = sqlite3.connect(str(db_path))
+    # 注意: schema 强制 listing_date NOT NULL — 用空字符串 '' 模拟"无效日期"
+    c.executescript("""
+        CREATE TABLE ipo_master (
+            ipo_id TEXT PRIMARY KEY, stock_code TEXT NOT NULL,
+            listing_date DATE NOT NULL, listing_chapter TEXT NOT NULL,
+            offer_price_hkd REAL
+        );
+        CREATE TABLE ipo_returns (ipo_id TEXT PRIMARY KEY, return_d1_close REAL);
+    """)
+    c.execute(
+        "INSERT INTO ipo_master VALUES (?, ?, ?, ?, ?)",
+        ("ipo_x", "1234.HK", "", "Main", 10.0),
+    )
+    c.commit()
+    c.close()
+
+    fb = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    p = _make_pred_for_export(project_id="proj_t4_baddate", ticker="1234.HK")
+    fb.save_prediction(p)
+    a = auto_record_outcome_for_prediction(
+        p, store=fb, db_path=db_path, dry_run=True,
+    )
+    assert a.matched_in_hkquant is True
+    assert a.would_write_outcome is False
+    assert "listing_date" in a.skip_reason
+    fb.close()
+
+
+def test_t4_auto_record_no_returns_row_still_writes_master_only_outcome(tmp_path) -> None:
+    """master 命中但无 ipo_returns 行 → 仍写 outcome (含 listing_date + price)."""
+    from src.feedback.auto_outcome import auto_record_outcome_for_prediction
+    from src.feedback.store import FeedbackStore
+
+    db = _build_hkquant_outcome_fixture(tmp_path)
+    fb = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    p = _make_pred_for_export(project_id="proj_t4_master_only", ticker="7777.HK")
+    pid = fb.save_prediction(p)
+    a = auto_record_outcome_for_prediction(
+        p, store=fb, db_path=db, dry_run=False,
+    )
+    assert a.would_write_outcome is True
+    o = fb.latest_outcome(pid)
+    assert o is not None
+    assert o.ipo_actual_price_hkd == 30.0
+    assert o.d1_return is None
+    fb.close()
+
+
+def test_t4_run_batch_dry_run(tmp_path) -> None:
+    """批跑 + dry-run + 多个 prediction (命中 + 未命中 + 已有 outcome)."""
+    from src.feedback.auto_outcome import run_batch
+    from src.feedback.store import FeedbackStore
+
+    db = _build_hkquant_outcome_fixture(tmp_path)
+    fb = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+
+    # P1: 命中 (新数据)
+    fb.save_prediction(_make_pred_for_export(
+        project_id="proj_p1", ticker="9999.HK"))
+    # P2: 命中 (破发公司)
+    fb.save_prediction(_make_pred_for_export(
+        project_id="proj_p2", ticker="8888.HK"))
+    # P3: ticker 不在 hkquant
+    fb.save_prediction(_make_pred_for_export(
+        project_id="proj_p3", ticker="0000.HK"))
+
+    stats, actions = run_batch(store=fb, db_path=db, dry_run=True)
+    assert stats.scanned == 3
+    assert stats.matched == 2
+    assert stats.written == 2  # 两个 dry-run "拟写"
+    assert stats.skipped_no_match == 1
+    fb.close()
+
+
+def test_t4_run_batch_only_ticker_filter(tmp_path) -> None:
+    """only_ticker 只跑指定 ticker."""
+    from src.feedback.auto_outcome import run_batch
+    from src.feedback.store import FeedbackStore
+
+    db = _build_hkquant_outcome_fixture(tmp_path)
+    fb = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    fb.save_prediction(_make_pred_for_export(
+        project_id="proj_a", ticker="9999.HK"))
+    fb.save_prediction(_make_pred_for_export(
+        project_id="proj_b", ticker="8888.HK"))
+
+    stats, _ = run_batch(
+        store=fb, db_path=db, dry_run=True, only_ticker="9999.HK",
+    )
+    assert stats.scanned == 1
+    assert stats.matched == 1
+    fb.close()
+
+
+def test_t4_cli_errors_when_hkquant_unconfigured(capsys) -> None:
+    """CLI: HKQUANT_DB_PATH 没设 → 退出码 2 + stderr 提示."""
+    import os
+    from src.feedback.auto_outcome import main
+    from config import get_settings
+    old = os.environ.pop("HKQUANT_DB_PATH", None)
+    get_settings.cache_clear()
+    try:
+        rc = main(["--apply"])
+        assert rc == 2
+        captured = capsys.readouterr()
+        assert "HKQUANT_DB_PATH" in captured.err
+    finally:
+        if old:
+            os.environ["HKQUANT_DB_PATH"] = old
+        get_settings.cache_clear()
+
+
 def test_feedback_store_theme_cache_ttl(tmp_path) -> None:
     """缓存超过 TTL 应失效返 None."""
     from datetime import datetime, timedelta
