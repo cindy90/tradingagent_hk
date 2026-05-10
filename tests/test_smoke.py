@@ -3206,6 +3206,298 @@ def test_scarcity_agent_in_workflow_steps() -> None:
     assert 0 < sc_pos < sn_pos
 
 
+# ============================================================================
+# Scarcity v2: 流量稀缺度 + IPO 排队 + 主题分类
+# ============================================================================
+
+def test_ifind_ipo_queue_stub_returns_empty() -> None:
+    """iFinD 接口未实现时, fetch_hk_ipo_queue 应返 [] 不抛."""
+    from src.data.ifind_ipo_queue import fetch_hk_ipo_queue, get_hk_ipo_queue
+
+    # stub 返回 [] (用户填充 iFinD 函数后会有真数据)
+    assert get_hk_ipo_queue() == []
+
+
+def test_ifind_ipo_queue_parse_records() -> None:
+    """parse_queue_records 应宽容映射多种字段名."""
+    from src.data.ifind_ipo_queue import parse_queue_records
+
+    raw = [
+        {"company_name": "A 公司", "hk_code": "H1234",
+         "business_scope": "协作机器人研发", "status": "申请版本"},
+        {"name": "B 公司", "code": "H5678",
+         "业务描述": "创新药临床期", "状态": "已通过聆讯"},
+        {"申请人": "C 公司", "递表日期": "2026-01-15"},
+        {},  # 空 dict 应被跳过
+        {"company_name": ""},  # 空名应被跳过
+    ]
+    parsed = parse_queue_records(raw)
+    assert len(parsed) == 3
+    assert parsed[0].company_name == "A 公司"
+    assert parsed[0].business_scope == "协作机器人研发"
+    assert parsed[1].business_scope == "创新药临床期"
+    assert parsed[1].status == "已通过聆讯"
+    assert parsed[2].submission_date == "2026-01-15"
+
+
+def test_theme_classifier_cache_hit(tmp_path) -> None:
+    """ThemeClassifier 命中缓存时不调 LLM."""
+    from src.agents.theme_classifier import ThemeClassifier
+    from src.data.ifind_ipo_queue import QueuedCompany
+    from src.feedback.store import FeedbackStore
+
+    db_path = tmp_path / "fb.sqlite"
+    store = FeedbackStore(db_path=str(db_path))
+    # 预填缓存
+    store.save_theme_classification(
+        "name:测试公司", industry_theme="Robotics_Automation",
+        confidence="高", rationale="预填",
+    )
+
+    class _SpyLLM:
+        def __init__(self):
+            self.call_count = 0
+        def complete(self, *a, **kw):
+            self.call_count += 1
+            class R:
+                text = '```json\n{"industry_theme": "Other", "confidence": "低"}\n```'
+            return R()
+
+    llm = _SpyLLM()
+    clf = ThemeClassifier(llm, store=store)
+    result = clf.classify(QueuedCompany(company_name="测试公司"))
+    assert result["industry_theme"] == "Robotics_Automation"
+    assert result["from_cache"] is True
+    assert llm.call_count == 0  # 缓存命中, LLM 0 调用
+
+
+def test_theme_classifier_calls_llm_and_caches(tmp_path) -> None:
+    """缓存未命中时调 LLM, 之后写入缓存."""
+    from src.agents.theme_classifier import ThemeClassifier
+    from src.data.ifind_ipo_queue import QueuedCompany
+    from src.feedback.store import FeedbackStore
+
+    db_path = tmp_path / "fb.sqlite"
+    store = FeedbackStore(db_path=str(db_path))
+
+    class _LLM:
+        def __init__(self):
+            self.call_count = 0
+        def complete(self, *a, **kw):
+            self.call_count += 1
+            class R:
+                text = (
+                    '```json\n'
+                    '{"industry_theme": "Bio_Pharma", "confidence": "中", '
+                    '"rationale": "创新药"}'
+                    '\n```'
+                )
+            return R()
+
+    llm = _LLM()
+    clf = ThemeClassifier(llm, store=store)
+    company = QueuedCompany(
+        company_name="X 生物", business_scope="II 期临床创新药",
+    )
+    r1 = clf.classify(company)
+    assert r1["industry_theme"] == "Bio_Pharma"
+    assert r1["from_cache"] is False
+    assert llm.call_count == 1
+    # 第二次同公司 → 命中缓存
+    r2 = clf.classify(company)
+    assert r2["from_cache"] is True
+    assert llm.call_count == 1
+
+
+def test_theme_classifier_falls_back_to_other_on_llm_failure(tmp_path) -> None:
+    """LLM 抛异常 → 落 'Other' 低置信."""
+    from src.agents.theme_classifier import ThemeClassifier
+    from src.data.ifind_ipo_queue import QueuedCompany
+    from src.feedback.store import FeedbackStore
+
+    class _BadLLM:
+        def complete(self, *a, **kw):
+            raise RuntimeError("network fail")
+
+    store = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    clf = ThemeClassifier(_BadLLM(), store=store)
+    r = clf.classify(QueuedCompany(company_name="错误公司"))
+    assert r["industry_theme"] == "Other"
+    assert r["confidence"] == "低"
+
+
+def test_theme_classifier_invalid_theme_falls_back(tmp_path) -> None:
+    """LLM 输出非枚举值 → Other."""
+    from src.agents.theme_classifier import ThemeClassifier
+    from src.data.ifind_ipo_queue import QueuedCompany
+    from src.feedback.store import FeedbackStore
+
+    class _LLM:
+        def complete(self, *a, **kw):
+            class R:
+                text = '```json\n{"industry_theme": "Crypto", "confidence": "高"}\n```'
+            return R()
+
+    store = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    clf = ThemeClassifier(_LLM(), store=store)
+    r = clf.classify(QueuedCompany(company_name="加密公司"))
+    assert r["industry_theme"] == "Other"
+    assert "Crypto" in r["rationale"] or "未识别" in r["rationale"]
+
+
+def test_scarcity_engine_pipeline_heuristic_4_plus_minus1() -> None:
+    """同主题排队 ≥ 4 → -1.0 (供给显著扩张)."""
+    from src.tools.scarcity import compute_scarcity_stats
+
+    peers = [{"thscode": "P1.HK", "market_cap_hkd_b": 100,
+              "avg_turnover_30d_hkd": 2e8, "ipo_date": "2018-01-01"}]
+    # 1 peer +1.5; top3 100% > 75% -0.5; 排队 4 家 -1.0 → 3.0
+    stats = compute_scarcity_stats(
+        peers, target_ticker="X.HK",
+        pipeline_companies_in_theme=["A", "B", "C", "D"],
+    )
+    assert stats.pipeline_count_in_theme == 4
+    assert any("供给显著扩张" in r for r in stats.rationale)
+    assert stats.raw_scarcity_score == 3.0
+
+
+def test_scarcity_engine_pipeline_heuristic_2_3_minus_05() -> None:
+    """同主题排队 2-3 → -0.5."""
+    from src.tools.scarcity import compute_scarcity_stats
+
+    peers = [{"thscode": "P1.HK", "market_cap_hkd_b": 100,
+              "avg_turnover_30d_hkd": 2e8, "ipo_date": "2018-01-01"}]
+    stats = compute_scarcity_stats(
+        peers, target_ticker="X.HK",
+        pipeline_companies_in_theme=["A", "B", "C"],
+    )
+    assert stats.pipeline_count_in_theme == 3
+    assert any("供给中度扩张" in r for r in stats.rationale)
+    # 1 peer +1.5; top3 100% -0.5; 排队 3 -0.5 → 3.5
+    assert stats.raw_scarcity_score == 3.5
+
+
+def test_scarcity_engine_pipeline_heuristic_zero_persists() -> None:
+    """无排队 → 现有稀缺度持续 (无扣分)."""
+    from src.tools.scarcity import compute_scarcity_stats
+
+    peers = [{"thscode": "P1.HK", "market_cap_hkd_b": 100,
+              "avg_turnover_30d_hkd": 2e8, "ipo_date": "2018-01-01"}]
+    stats = compute_scarcity_stats(
+        peers, target_ticker="X.HK",
+        pipeline_companies_in_theme=[],
+    )
+    assert stats.pipeline_count_in_theme == 0
+    assert any("无排队中" in r for r in stats.rationale)
+    # 1 peer +1.5; top3 100% -0.5; 排队 0 → 0; 共 4.0
+    assert stats.raw_scarcity_score == 4.0
+
+
+def test_scarcity_render_includes_pipeline() -> None:
+    """render_stats_for_prompt 应展示 pipeline_count + 公司样例."""
+    from src.tools.scarcity import compute_scarcity_stats, render_stats_for_prompt
+
+    stats = compute_scarcity_stats(
+        [{"thscode": "P1.HK", "market_cap_hkd_b": 100,
+          "avg_turnover_30d_hkd": 2e8, "ipo_date": "2018-01-01"}],
+        target_ticker="X.HK",
+        pipeline_companies_in_theme=["甲公司", "乙公司"],
+    )
+    md = render_stats_for_prompt(stats)
+    assert "排队中" in md
+    assert "甲公司" in md
+    assert "v2 流量稀缺度" in md
+
+
+def test_scarcity_score_card_v2_pipeline_field() -> None:
+    """ScarcityScoreCard 应有 pipeline_count_in_theme 字段."""
+    from src.feedback.models import ScarcityScoreCard
+
+    card = ScarcityScoreCard(
+        summary="x", overall_score=3.0, scarcity_score=3.0,
+        listed_count_in_theme=5, pipeline_count_in_theme=2,
+        pipeline_companies=["A", "B"],
+    )
+    assert card.pipeline_count_in_theme == 2
+    assert card.pipeline_companies == ["A", "B"]
+
+
+def test_resolve_pipeline_filters_by_theme(tmp_path) -> None:
+    """_resolve_pipeline_in_theme 只返目标 theme 的命中."""
+    from src.agents.scarcity import _resolve_pipeline_in_theme
+    from src.agents.theme_classifier import ThemeClassifier
+    from src.data.ifind_ipo_queue import QueuedCompany
+    from src.feedback.store import FeedbackStore
+
+    store = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    # 预填缓存避免调 LLM
+    store.save_theme_classification(
+        "name:机器人 a", industry_theme="Robotics_Automation",
+    )
+    store.save_theme_classification(
+        "name:生物 b", industry_theme="Bio_Pharma",
+    )
+    store.save_theme_classification(
+        "name:机器人 c", industry_theme="Robotics_Automation",
+    )
+
+    class _LLM:
+        def complete(self, *a, **kw):
+            class R:
+                text = '```json\n{"industry_theme":"Other","confidence":"低"}\n```'
+            return R()
+
+    clf = ThemeClassifier(_LLM(), store=store)
+    queue = [
+        QueuedCompany(company_name="机器人 A"),
+        QueuedCompany(company_name="生物 B"),
+        QueuedCompany(company_name="机器人 C"),
+    ]
+    matched = _resolve_pipeline_in_theme(
+        "Robotics_Automation", clf, queue,
+    )
+    assert len(matched) == 2
+    assert "机器人 A" in matched
+    assert "机器人 C" in matched
+    assert "生物 B" not in matched
+
+
+def test_resolve_pipeline_empty_when_no_classifier() -> None:
+    """classifier=None 时优雅返 [], 不抛."""
+    from src.agents.scarcity import _resolve_pipeline_in_theme
+    from src.data.ifind_ipo_queue import QueuedCompany
+
+    matched = _resolve_pipeline_in_theme(
+        "Robotics_Automation", None,
+        [QueuedCompany(company_name="X")],
+    )
+    assert matched == []
+
+
+def test_feedback_store_theme_cache_ttl(tmp_path) -> None:
+    """缓存超过 TTL 应失效返 None."""
+    from datetime import datetime, timedelta
+    from src.feedback.store import FeedbackStore
+
+    store = FeedbackStore(db_path=str(tmp_path / "fb.sqlite"))
+    store.save_theme_classification(
+        "test_key", industry_theme="Bio_Pharma",
+    )
+    # 立即查 → 命中
+    r = store.get_theme_classification("test_key", ttl_hours=24)
+    assert r is not None
+    assert r["industry_theme"] == "Bio_Pharma"
+    # 手工把 classified_at 改成 25h 前
+    expired = (datetime.utcnow() - timedelta(hours=25)).isoformat()
+    store._conn.execute(
+        "UPDATE theme_classification_cache SET classified_at=? WHERE company_key=?",
+        (expired, "test_key"),
+    )
+    store._conn.commit()
+    r2 = store.get_theme_classification("test_key", ttl_hours=24)
+    assert r2 is None  # 失效
+
+
 def test_decision_engine_sensitivity_in_extras() -> None:
     """DecisionAgent 应在成功后把引擎敏感性写入 ctx.extras.misc['engine_sensitivity']."""
     # 直接验证 sensitivity_engine 工作 (不跑整个 LLM agent)

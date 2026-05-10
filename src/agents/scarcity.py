@@ -15,9 +15,14 @@ V2 后补: "流量稀缺度" (HKEX 排队中同类公司, 影响未来 6-12 月�
 """
 from __future__ import annotations
 
+from loguru import logger
+
 from src.agents._template import TemplateAgent
 from src.agents.base import AgentContext
+from src.agents.theme_classifier import ThemeClassifier
+from src.data.ifind_ipo_queue import QueuedCompany, get_hk_ipo_queue
 from src.feedback.models import ScarcityScoreCard
+from src.feedback.store import FeedbackStore
 from src.llm import ModelTier
 from src.tools.scarcity import compute_scarcity_stats, render_stats_for_prompt
 
@@ -31,6 +36,13 @@ SYSTEM = """你是港股 IPO 基石投资委员会的稀缺性分析师。基石
    - 同主题港股已上市数 (引擎已算)
    - 市值结构 (龙头垄断 vs 中小盘分布)
    - 流动性是否枯竭 (即使少, 但都没量, 不构成真稀缺)
+
+1.5 **流量稀缺度 ⭐ (v2)**: 同主题在港交所**排队中**的公司 (申请版本/已通过聆讯) 数量
+   - 引擎已算 pipeline_count_in_theme
+   - 排队中 ≥ 4 → 6-12 月内供给显著扩张, 现有稀缺度将被压缩
+   - 排队中 2-3 → 中度扩张, 现有溢价空间会收窄
+   - 排队中 0 → 现有稀缺度持续, 估值溢价可维持
+   - **此项必须在论述中显式提及**, 影响下文"估值溢价/折扣建议"
 
 2. **差异化点**: 即使同主题已有多家, target 的差异化点是什么?
    - 技术路线 (例: 同样做协作机器人, 7 轴 vs 6 轴; 力控精度差异)
@@ -124,25 +136,83 @@ def _render_peers_compact(peers: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _resolve_pipeline_in_theme(
+    target_theme: str | None,
+    classifier: ThemeClassifier | None,
+    queue: list[QueuedCompany],
+) -> list[str]:
+    """对全量 IPO 排队列表逐家分类, 返回与 target_theme 匹配的公司名.
+
+    队列空 / target_theme 缺失 / classifier 缺失 时返 [] (优雅降级).
+    """
+    if not target_theme or target_theme == "Other" or not queue or classifier is None:
+        return []
+    matched: list[str] = []
+    for c in queue:
+        try:
+            r = classifier.classify(c)
+            if r.get("industry_theme") == target_theme:
+                matched.append(c.company_name)
+        except Exception as e:
+            logger.debug(f"[ScarcityAgent] 分类失败 {c.company_name}: {e}")
+    return matched
+
+
 class ScarcityAgent(TemplateAgent):
     name = "scarcity"
-    description = "港股稀缺性分析 Agent (存量 + 情绪联动)"
+    description = "港股稀缺性分析 Agent (存量 + 流量 + 情绪联动)"
     tier = ModelTier.ANALYZE
     SYSTEM = SYSTEM
     score_card_class = ScarcityScoreCard
+
+    def __init__(self, llm, summarizer=None, *, store: FeedbackStore | None = None):
+        super().__init__(llm, summarizer)
+        # store 用于 theme 分类缓存; 注入失败时仍可工作 (无缓存)
+        self._store = store
+        try:
+            if store is None:
+                self._store = FeedbackStore()
+        except Exception as e:
+            logger.warning(f"[ScarcityAgent] FeedbackStore 初始化失败 (theme 缓存禁用): {e}")
+            self._store = None
+        self._classifier = ThemeClassifier(llm, store=self._store)
 
     def build_user_message(self, ctx: AgentContext) -> str:
         peers = ctx.extras.peers or []
         target_ticker = ctx.ticker
 
-        # 引擎算确定性指标
-        stats = compute_scarcity_stats(peers, target_ticker=target_ticker)
+        # v2 流量稀缺度: 拉港股 IPO 排队 + 主题分类 + 匹配 target_theme
+        target_theme = None
+        profile = getattr(ctx.extras, "listing_profile", None)
+        if profile is not None:
+            target_theme = getattr(profile, "industry_theme", None)
+        pipeline_matched: list[str] = []
+        try:
+            queue = get_hk_ipo_queue()
+            if queue and target_theme:
+                pipeline_matched = _resolve_pipeline_in_theme(
+                    target_theme, self._classifier, queue,
+                )
+                logger.info(
+                    f"[ScarcityAgent] 排队全量 {len(queue)} 家, "
+                    f"主题 '{target_theme}' 命中 {len(pipeline_matched)} 家"
+                )
+        except Exception as e:
+            logger.warning(f"[ScarcityAgent] 流量稀缺度获取失败 (降级到仅存量): {e}")
+
+        # 引擎算确定性指标 (含流量)
+        stats = compute_scarcity_stats(
+            peers, target_ticker=target_ticker,
+            pipeline_companies_in_theme=pipeline_matched,
+        )
         # 写入 ctx.extras 供下游 SentimentAgent / DecisionAgent 引用
         ctx.extras.misc["engine_scarcity"] = {
             "listed_count_in_theme": stats.listed_count_in_theme,
             "market_cap_top3_share": stats.market_cap_top3_share,
             "liquidity_thinning_ratio": stats.liquidity_thinning_ratio,
             "recent_ipo_count_12m": stats.recent_ipo_count_12m,
+            "pipeline_count_in_theme": stats.pipeline_count_in_theme,
+            "pipeline_companies": stats.pipeline_companies,
             "raw_scarcity_score": stats.raw_scarcity_score,
             "rationale": stats.rationale,
             "warnings": stats.warnings,

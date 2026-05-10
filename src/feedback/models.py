@@ -139,6 +139,14 @@ class ScarcityScoreCard(AgentScoreCard):
     recent_ipo_count_12m: int = Field(
         default=0, description="过去 12 月同主题 IPO 数 (边际稀缺度)",
     )
+    pipeline_count_in_theme: int = Field(
+        default=0,
+        description="v2 流量稀缺度: 同主题港股 IPO 排队中 (申请版本/已通过聆讯) 公司数",
+    )
+    pipeline_companies: list[str] = Field(
+        default_factory=list,
+        description="排队中匹配 target 主题的公司名 (前 5 家足以)",
+    )
     sentiment_linkage: Literal[
         "稀缺+热情", "稀缺+冷淡", "拥挤+热情", "拥挤+冷淡", "中性",
     ] = Field(

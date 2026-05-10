@@ -134,6 +134,15 @@ CREATE TABLE IF NOT EXISTS scores (
 );
 
 CREATE INDEX IF NOT EXISTS idx_scores_prediction ON scores(prediction_id);
+
+-- HK IPO 排队中公司的 industry_theme 分类缓存 (LLM 调用昂贵, 24h 内复用)
+CREATE TABLE IF NOT EXISTS theme_classification_cache (
+    company_key TEXT PRIMARY KEY,         -- 规范化公司名 / iFinD code
+    industry_theme TEXT NOT NULL,         -- 命中 ListingProfile.industry_theme 枚举
+    confidence TEXT DEFAULT '中',         -- 高 / 中 / 低
+    rationale TEXT DEFAULT '',
+    classified_at TEXT NOT NULL           -- ISO datetime
+);
 """
 
 _JSON_FIELDS_PRED = {
@@ -343,6 +352,47 @@ class FeedbackStore:
         return _row_to_score(row) if row else None
 
     # ---------- 统计 ----------
+
+    # ---------- IPO 排队公司主题分类缓存 (24h TTL) ----------
+
+    def get_theme_classification(
+        self, company_key: str, *, ttl_hours: int = 24,
+    ) -> dict[str, Any] | None:
+        """读取缓存. 超过 ttl_hours 视为失效返 None."""
+        from datetime import datetime, timedelta
+        row = self._conn.execute(
+            "SELECT industry_theme, confidence, rationale, classified_at "
+            "FROM theme_classification_cache WHERE company_key=?",
+            (company_key,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            ts = datetime.fromisoformat(row["classified_at"])
+        except (ValueError, TypeError):
+            return None
+        if datetime.utcnow() - ts > timedelta(hours=ttl_hours):
+            return None
+        return {
+            "industry_theme": row["industry_theme"],
+            "confidence": row["confidence"] or "中",
+            "rationale": row["rationale"] or "",
+            "classified_at": row["classified_at"],
+        }
+
+    def save_theme_classification(
+        self, company_key: str, *, industry_theme: str,
+        confidence: str = "中", rationale: str = "",
+    ) -> None:
+        from datetime import datetime
+        self._conn.execute(
+            "INSERT OR REPLACE INTO theme_classification_cache "
+            "(company_key, industry_theme, confidence, rationale, classified_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (company_key, industry_theme, confidence, rationale,
+             datetime.utcnow().isoformat()),
+        )
+        self._conn.commit()
 
     # ---------- weight calibration priors (Phase B) ----------
 

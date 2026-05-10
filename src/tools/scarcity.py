@@ -40,7 +40,11 @@ class ScarcityStats:
     liquidity_thinning_ratio: float | None  # 占比 (0-1)
     avg_first_day_return_pct: float | None  # 同主题最近 IPO 首日均值
     recent_ipo_count_12m: int           # 过去 12 月同主题 IPO 数
-    raw_scarcity_score: float           # 引擎初算分 (1-5, LLM 可微调)
+    # v2 流量稀缺度
+    pipeline_count_in_theme: int = 0    # 同主题排队中 (申请版本/已通过聆讯) 公司数
+    pipeline_companies: list[str] = field(default_factory=list)
+                                         # 排队中同主题公司名 (用于 prompt 透明度)
+    raw_scarcity_score: float = 3.0     # 引擎初算分 (1-5, LLM 可微调)
     rationale: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -89,6 +93,7 @@ def compute_scarcity_stats(
     target_ticker: str | None = None,
     liquidity_threshold_hkd: float = 5e7,  # 5000 万 HKD
     today: date | None = None,
+    pipeline_companies_in_theme: list[str] | None = None,
 ) -> ScarcityStats:
     """从 peers 列表 (含市值 / 30 日均成交 / IPO 日期 / 首日涨幅) 算稀缺度统计.
 
@@ -97,6 +102,8 @@ def compute_scarcity_stats(
         target_ticker: 目标公司 ticker (从 peers 中排除, 如已混入)
         liquidity_threshold_hkd: 流动性枯竭阈值 (默认 5000 万 HKD/日)
         today: 用于计算"过去 12 月", 测试可注入
+        pipeline_companies_in_theme: 同主题港股 IPO 排队中公司名列表
+            (来自 ifind_ipo_queue + theme_classifier 命中). v2 流量稀缺度.
 
     Returns: ScarcityStats — 全部确定性, LLM 不参与
     """
@@ -111,6 +118,9 @@ def compute_scarcity_stats(
         )
     ]
 
+    pipeline_companies = list(pipeline_companies_in_theme or [])
+    pipeline_count = len(pipeline_companies)
+
     n = len(peers)
     if n == 0:
         warnings.append("peer 列表为空, 无法量化稀缺度")
@@ -119,6 +129,8 @@ def compute_scarcity_stats(
             market_cap_top3_share=None, median_market_cap_hkd_b=None,
             liquidity_thinning_count=0, liquidity_thinning_ratio=None,
             avg_first_day_return_pct=None, recent_ipo_count_12m=0,
+            pipeline_count_in_theme=pipeline_count,
+            pipeline_companies=pipeline_companies,
             raw_scarcity_score=4.0,  # 没 peer 时偏稀缺, 但需 LLM 验证主题界定
             rationale=["peer 数为 0 → 表面独苗, 但需确认主题界定是否过窄"],
             warnings=warnings,
@@ -205,6 +217,27 @@ def compute_scarcity_stats(
             f"过去 12 月同主题已 IPO {recent_count} 家, 边际稀缺度递减 → -0.5"
         )
 
+    # v2 流量稀缺度: 同主题排队中公司数
+    # 4+ → -1.0 (供给将在 6-12 月内显著扩张, 边际稀缺度大幅压缩)
+    # 2-3 → -0.5 (供给中度扩张)
+    # 1 → -0.2 (轻微)
+    # 0 → 0 (供给端无新增, 现有稀缺度持续)
+    if pipeline_count >= 4:
+        score -= 1.0
+        rationale.append(
+            f"同主题排队中 {pipeline_count} 家 → 6-12 月供给显著扩张, -1.0"
+        )
+    elif pipeline_count >= 2:
+        score -= 0.5
+        rationale.append(
+            f"同主题排队中 {pipeline_count} 家 → 供给中度扩张, -0.5"
+        )
+    elif pipeline_count == 1:
+        score -= 0.2
+        rationale.append(f"同主题排队中 1 家 → 轻微供给扩张, -0.2")
+    else:
+        rationale.append("同主题无排队中公司, 现有稀缺度持续")
+
     score = max(1.0, min(5.0, score))
 
     return ScarcityStats(
@@ -216,6 +249,8 @@ def compute_scarcity_stats(
         liquidity_thinning_ratio=round(thinning_ratio, 4) if thinning_ratio is not None else None,
         avg_first_day_return_pct=round(avg_fdr, 2) if avg_fdr is not None else None,
         recent_ipo_count_12m=recent_count,
+        pipeline_count_in_theme=pipeline_count,
+        pipeline_companies=pipeline_companies,
         raw_scarcity_score=round(score, 2),
         rationale=rationale,
         warnings=warnings,
@@ -242,6 +277,14 @@ def render_stats_for_prompt(stats: ScarcityStats) -> str:
     if stats.avg_first_day_return_pct is not None:
         lines.append(f"- 最近同主题 IPO 首日开盘均值: {stats.avg_first_day_return_pct:+.2f}%")
     lines.append(f"- 过去 12 月同主题 IPO 数: {stats.recent_ipo_count_12m}")
+    lines.append(
+        f"- **同主题港股排队中 (申请版本/已通过聆讯): {stats.pipeline_count_in_theme} 家** "
+        f"⭐ v2 流量稀缺度"
+    )
+    if stats.pipeline_companies:
+        sample = stats.pipeline_companies[:5]
+        more = "" if len(stats.pipeline_companies) <= 5 else f" 等 {len(stats.pipeline_companies)} 家"
+        lines.append(f"  - 排队中: {', '.join(sample)}{more}")
     lines.append(f"- **引擎初算稀缺度: {stats.raw_scarcity_score} / 5**")
     if stats.rationale:
         lines.append("")
