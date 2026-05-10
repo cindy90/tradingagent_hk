@@ -1011,12 +1011,14 @@ def test_normalize_step_names_handles_aliases() -> None:
     # 短名映射到标准名
     assert "prospectus_analyst" in normalize_step_names("prospectus")
     assert "debate_manager" in normalize_step_names("debate")
-    # 'all' 返回全部 10 步按序号排（v2 加了 fact_check）
+    # 'all' 返回全部 11 步按序号排（v2 加了 fact_check; T2 加了 cornerstone）
     all_steps = normalize_step_names("all")
     assert all_steps[0] == "prospectus_analyst"
     assert all_steps[-1] == "decision"
-    assert len(all_steps) == 10
+    assert len(all_steps) == 11
     assert "fact_check" in all_steps
+    assert "cornerstone" in all_steps
+    assert all_steps.index("cornerstone") == 1  # 紧跟在 prospectus_analyst 之后
     # 测试 fact_check 别名
     assert "fact_check" in normalize_step_names("factcheck")
     # 多步去重 + 按序号排序
@@ -3677,6 +3679,324 @@ def test_scarcity_engine_override_listed_count_only() -> None:
     )
     assert stats.listed_count_in_theme == 15
     assert any("红海" in r for r in stats.rationale)
+
+
+# ============================================================================
+# T2: hkquant cornerstone 解析 + CornerstoneAgent
+# ============================================================================
+
+def _build_hkquant_cornerstone_fixture(tmp_path):
+    """构造 cornerstone_master + cornerstone_aliases + performance_asof
+    + ipo_cornerstone_link 的 in-memory SQLite fixture."""
+    import sqlite3
+    db_path = tmp_path / "nacs_cs.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE cornerstone_master (
+            cornerstone_id TEXT PRIMARY KEY,
+            canonical_name TEXT NOT NULL,
+            name_zh TEXT,
+            cornerstone_type TEXT NOT NULL,
+            country_of_origin TEXT,
+            aum_usd_latest REAL,
+            is_chinese INTEGER DEFAULT 0,
+            is_longterm INTEGER DEFAULT 0
+        );
+        CREATE TABLE cornerstone_aliases (
+            alias_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cornerstone_id TEXT NOT NULL,
+            alias_text TEXT NOT NULL,
+            alias_text_lower TEXT NOT NULL,
+            alias_type TEXT NOT NULL,
+            match_confidence REAL DEFAULT 1.0
+        );
+        CREATE TABLE cornerstone_performance_asof (
+            cornerstone_id TEXT NOT NULL,
+            as_of_date DATE NOT NULL,
+            ipo_count_5y INTEGER DEFAULT 0,
+            avg_m6_return_5y REAL,
+            winrate_m6_5y REAL,
+            avg_d30_return_5y REAL,
+            lockup_discipline_score REAL,
+            sector_expertise TEXT,
+            PRIMARY KEY (cornerstone_id, as_of_date)
+        );
+    """)
+    conn.executemany(
+        "INSERT INTO cornerstone_master VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("cs_hillhouse", "Hillhouse Capital", "高瓴资本",
+             "PE", "Singapore", 1e11, 0, 1),
+            ("cs_gic", "GIC Private", "新加坡政府投资公司",
+             "Sovereign", "Singapore", 7e11, 0, 1),
+            ("cs_tencent", "Tencent Holdings", "腾讯控股",
+             "Strategic", "China", None, 1, 0),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO cornerstone_aliases (cornerstone_id, alias_text, "
+        "alias_text_lower, alias_type, match_confidence) VALUES (?, ?, ?, ?, ?)",
+        [
+            ("cs_hillhouse", "Hillhouse Capital", "hillhouse capital", "EN", 1.0),
+            ("cs_hillhouse", "高瓴资本", "高瓴资本", "ZH", 1.0),
+            ("cs_hillhouse", "Hillhouse", "hillhouse", "EN_SHORT", 0.9),
+            ("cs_gic", "GIC Private Limited", "gic private limited", "EN", 1.0),
+            ("cs_gic", "新加坡政府投资公司", "新加坡政府投资公司", "ZH", 1.0),
+            ("cs_gic", "GIC", "gic", "EN_SHORT", 0.85),
+            ("cs_tencent", "Tencent Holdings Limited", "tencent holdings limited", "EN", 1.0),
+            ("cs_tencent", "腾讯控股", "腾讯控股", "ZH", 1.0),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO cornerstone_performance_asof VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("cs_hillhouse", "2026-04-01", 12, 0.18, 0.67, 0.10, 0.85,
+             "Pharmaceuticals, Biotechnology & Life Sciences"),
+            ("cs_gic", "2026-04-01", 8, 0.05, 0.55, 0.03, 0.92, "Diversified"),
+            ("cs_tencent", "2026-04-01", 5, -0.10, 0.40, -0.05, 0.65,
+             "Software & Services"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_normalize_cs_name_strips_legal_suffixes() -> None:
+    """normalize_cs_name 剥后缀 + 标点 + 括号注释."""
+    from src.data.hkquant_cornerstone import normalize_cs_name
+    assert normalize_cs_name("高瓴资本管理有限公司") == "高瓴资本"
+    assert normalize_cs_name("Hillhouse Capital (Asia) Limited") == "hillhouse"
+    assert normalize_cs_name("GIC Private Limited") == "gic"
+    assert normalize_cs_name("Tencent Holdings Limited (腾讯控股)") == "tencent"
+    assert normalize_cs_name("") == ""
+
+
+def test_normalize_cs_name_handles_nested_suffixes() -> None:
+    """嵌套后缀循环剥除."""
+    from src.data.hkquant_cornerstone import normalize_cs_name
+    # ...投资管理有限公司 应剥光; capital 也应剥
+    assert "投资管理有限公司" not in normalize_cs_name("某资本投资管理有限公司")
+
+
+def test_resolve_cornerstone_id_strategy_1_exact(tmp_path) -> None:
+    """策略 1: 完全大小写不敏感命中, conf = alias_conf."""
+    import sqlite3
+    from src.data.hkquant_cornerstone import resolve_cornerstone_id
+    db = _build_hkquant_cornerstone_fixture(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        r = resolve_cornerstone_id(conn, "Hillhouse Capital")
+        assert r is not None
+        cs_id, conf = r
+        assert cs_id == "cs_hillhouse"
+        assert conf == 1.0
+    finally:
+        conn.close()
+
+
+def test_resolve_cornerstone_id_strategy_2_normalized(tmp_path) -> None:
+    """策略 2: 加上'有限公司'后缀, 归一化后命中."""
+    import sqlite3
+    from src.data.hkquant_cornerstone import resolve_cornerstone_id
+    db = _build_hkquant_cornerstone_fixture(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        # alias 是 "高瓴资本"; 输入 "高瓴资本有限公司" 应在策略 2 命中
+        r = resolve_cornerstone_id(conn, "高瓴资本有限公司")
+        assert r is not None
+        assert r[0] == "cs_hillhouse"
+    finally:
+        conn.close()
+
+
+def test_resolve_cornerstone_id_strategy_3_substring(tmp_path) -> None:
+    """策略 3: alias 在 raw 中作子串."""
+    import sqlite3
+    from src.data.hkquant_cornerstone import resolve_cornerstone_id
+    db = _build_hkquant_cornerstone_fixture(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        # alias "GIC" 在 raw "GIC Asia Pacific Holdings" 中作子串
+        r = resolve_cornerstone_id(conn, "GIC Asia Pacific Holdings")
+        assert r is not None
+        assert r[0] == "cs_gic"
+    finally:
+        conn.close()
+
+
+def test_resolve_cornerstone_id_below_threshold(tmp_path) -> None:
+    """完全无关名称应返 None."""
+    import sqlite3
+    from src.data.hkquant_cornerstone import resolve_cornerstone_id
+    db = _build_hkquant_cornerstone_fixture(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        r = resolve_cornerstone_id(
+            conn, "完全陌生的某某私募", min_confidence=0.40,
+        )
+        assert r is None
+    finally:
+        conn.close()
+
+
+def test_enrich_cornerstone_names_full(tmp_path) -> None:
+    """enrich_cornerstone_names: 混合命中 + 未命中 + 业绩."""
+    from src.data.hkquant_cornerstone import enrich_cornerstone_names
+    db = _build_hkquant_cornerstone_fixture(tmp_path)
+    rows = enrich_cornerstone_names(
+        ["高瓴资本管理有限公司",       # 应命中 cs_hillhouse
+         "GIC Private Limited",         # 应命中 cs_gic
+         "陌生小私募"],                  # 未命中
+        asof="2026-05-10", db_path=db,
+    )
+    assert len(rows) == 3
+    assert rows[0].cornerstone_id == "cs_hillhouse"
+    assert rows[0].canonical_name == "Hillhouse Capital"
+    assert rows[0].is_longterm is True
+    assert rows[0].winrate_m6_5y == 0.67
+    assert rows[1].cornerstone_id == "cs_gic"
+    assert rows[1].lockup_discipline_score == 0.92
+    assert rows[2].cornerstone_id is None
+    assert rows[2].canonical_name is None
+
+
+def test_enrich_cornerstone_names_silent_when_unconfigured() -> None:
+    """HKQUANT_DB_PATH 未配置 → 全部 unmatched, 不抛."""
+    import os
+    from src.data.hkquant_cornerstone import enrich_cornerstone_names
+    from config import get_settings
+    old = os.environ.pop("HKQUANT_DB_PATH", None)
+    get_settings.cache_clear()
+    try:
+        rows = enrich_cornerstone_names(["高瓴资本", "GIC"])
+        assert len(rows) == 2
+        assert all(r.cornerstone_id is None for r in rows)
+        assert all(r.confidence == 0.0 for r in rows)
+    finally:
+        if old:
+            os.environ["HKQUANT_DB_PATH"] = old
+        get_settings.cache_clear()
+
+
+def test_enrich_cornerstone_names_empty_input() -> None:
+    """空输入返 []."""
+    from src.data.hkquant_cornerstone import enrich_cornerstone_names
+    assert enrich_cornerstone_names([]) == []
+
+
+def test_get_cornerstone_master_and_perf_asof(tmp_path) -> None:
+    """单条查询 master / performance_asof."""
+    from src.data.hkquant_cornerstone import (
+        get_cornerstone_master, get_cornerstone_performance_asof,
+    )
+    db = _build_hkquant_cornerstone_fixture(tmp_path)
+    m = get_cornerstone_master("cs_hillhouse", db_path=db)
+    assert m["canonical_name"] == "Hillhouse Capital"
+    assert m["is_longterm"] == 1
+
+    p = get_cornerstone_performance_asof(
+        "cs_hillhouse", asof="2026-05-10", db_path=db,
+    )
+    assert p["ipo_count_5y"] == 12
+    assert p["winrate_m6_5y"] == 0.67
+
+
+def test_render_enrichment_md_contains_summary(tmp_path) -> None:
+    """渲染应含命中数 + 长线锚定 + 表格."""
+    from src.data.hkquant_cornerstone import (
+        enrich_cornerstone_names, render_enrichment_md,
+    )
+    db = _build_hkquant_cornerstone_fixture(tmp_path)
+    rows = enrich_cornerstone_names(
+        ["Hillhouse Capital", "GIC", "陌生小私募"],
+        asof="2026-05-10", db_path=db,
+    )
+    md = render_enrichment_md(rows)
+    assert "命中 **2** 家" in md
+    assert "长线锚定" in md
+    assert "高瓴资本" in md or "Hillhouse" in md
+    assert "未命中" in md  # 第 3 家
+
+
+def test_extract_cornerstone_names_from_brief() -> None:
+    """LLM 抽取阶段: mock 返回结构化基石列表."""
+    from src.agents.cornerstone import extract_cornerstone_names_from_brief
+
+    class _LLM:
+        def complete(self, *a, **kw):
+            class R:
+                text = (
+                    '```json\n{"cornerstones": ['
+                    '{"name": "高瓴资本", "ticket_size_hkd": 5e8, "lockup_months": 6},'
+                    '{"name": "GIC Private", "ticket_size_hkd": 3e8, "lockup_months": 6}'
+                    ']}\n```'
+                )
+            return R()
+
+    llm = _LLM()
+    out = extract_cornerstone_names_from_brief(llm, "招股书 ... 高瓴 ... GIC ...")
+    assert len(out) == 2
+    assert out[0]["name"] == "高瓴资本"
+    assert out[1]["name"] == "GIC Private"
+
+
+def test_extract_cornerstone_names_handles_llm_failure() -> None:
+    """LLM 抛异常时返 [], 不抛."""
+    from src.agents.cornerstone import extract_cornerstone_names_from_brief
+
+    class _BadLLM:
+        def complete(self, *a, **kw):
+            raise RuntimeError("network fail")
+
+    out = extract_cornerstone_names_from_brief(_BadLLM(), "x")
+    assert out == []
+
+
+def test_extract_cornerstone_names_empty_brief() -> None:
+    """空 brief 不触发 LLM, 直接返 []."""
+    from src.agents.cornerstone import extract_cornerstone_names_from_brief
+
+    class _SpyLLM:
+        called = False
+        def complete(self, *a, **kw):
+            type(self).called = True
+            return None
+
+    llm = _SpyLLM()
+    out = extract_cornerstone_names_from_brief(llm, "")
+    assert out == []
+    assert _SpyLLM.called is False
+
+
+def test_cornerstone_score_card_schema() -> None:
+    """CornerstoneScoreCard 必填字段 + 默认值."""
+    from src.feedback.models import CornerstoneScoreCard
+    c = CornerstoneScoreCard(
+        summary="x", overall_score=4.0,
+        cornerstone_quality_score=4.0,
+        extracted_count=5, matched_count=3,
+        has_longterm_anchor=True,
+        chinese_capital_pct=0.33,
+        avg_winrate_m6_5y=0.62,
+    )
+    assert c.has_longterm_anchor is True
+    assert c.matched_count == 3
+    assert c.flagged_concerns == []
+
+
+def test_cornerstone_in_workflow_registry() -> None:
+    """CornerstoneAgent 必须在 prospectus_analyst 之后, industry 之前."""
+    src_lines = open("src/graph/workflow.py", encoding="utf-8").read()
+    assert '"cornerstone": (2,' in src_lines
+    pos_p = src_lines.find("ProspectusAnalystAgent(self.llm, self.summarizer)")
+    pos_c = src_lines.find("CornerstoneAgent(self.llm, self.summarizer)")
+    pos_i = src_lines.find("IndustryAgent(self.llm, self.summarizer)")
+    assert 0 < pos_p < pos_c < pos_i
 
 
 def test_feedback_store_theme_cache_ttl(tmp_path) -> None:

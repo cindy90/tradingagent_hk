@@ -171,6 +171,33 @@ class RiskItem(BaseModel):
     early_warning: list[str] = Field(default_factory=list, description="可观测的预警阈值")
 
 
+class CornerstoneScoreCard(AgentScoreCard):
+    """T2 基石投资人质量评分卡 (来自 hkquant cornerstone_master + performance_asof)."""
+    cornerstone_quality_score: float = Field(
+        ge=1, le=5, description="基石阵容综合质量 (1=差 5=优)",
+    )
+    extracted_count: int = Field(default=0, description="招股书提取出的基石数")
+    matched_count: int = Field(
+        default=0, description="hkquant 命中数 (有历史 track record 可查)",
+    )
+    has_longterm_anchor: bool = Field(
+        default=False, description="是否有 hkquant 标注的长线投资人锚定",
+    )
+    chinese_capital_pct: float = Field(
+        default=0.0, ge=0, le=1, description="中资基石占命中数比例",
+    )
+    avg_winrate_m6_5y: float | None = Field(
+        default=None, description="阵容 5y M6 平均胜率 (0-1)",
+    )
+    avg_lockup_discipline: float | None = Field(
+        default=None, description="阵容平均锁定期纪律分 (0-1)",
+    )
+    flagged_concerns: list[str] = Field(
+        default_factory=list,
+        description="基石阵容潜在问题 (如关联交易嫌疑 / 流动性差 / 沾大单)",
+    )
+
+
 class RiskScoreCard(AgentScoreCard):
     overall_risk_level: float = Field(ge=1, le=5, description="1=极高风险 5=极低")
     risk_dimensions: dict[str, float] = Field(

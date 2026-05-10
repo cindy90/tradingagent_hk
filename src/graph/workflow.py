@@ -335,15 +335,16 @@ def load_run_metadata(reports_dir: Path) -> dict[str, Any]:
 # Agent 名 → (实例化函数, 步骤序号, 是否需要 RAG, 是否需要 SDK peers 数据)
 _AGENT_REGISTRY: dict[str, tuple[int, bool, bool]] = {
     "prospectus_analyst": (1, True, False),
-    "industry": (2, True, True),
-    "macro": (3, False, True),
-    "comparable": (4, True, True),
-    "tech_trend": (5, True, False),
-    "sentiment": (6, False, True),
-    "fact_check": (7, False, False),  # 新增 #12 数字核对
-    "debate_manager": (8, False, False),
-    "risk": (9, False, False),
-    "decision": (10, False, False),
+    "cornerstone": (2, False, False),  # T2: 基石质量 (依赖 prospectus_analyst brief + hkquant)
+    "industry": (3, True, True),
+    "macro": (4, False, True),
+    "comparable": (5, True, True),
+    "tech_trend": (6, True, False),
+    "sentiment": (7, False, True),
+    "fact_check": (8, False, False),  # 新增 #12 数字核对
+    "debate_manager": (9, False, False),
+    "risk": (10, False, False),
+    "decision": (11, False, False),
 }
 
 # 用户输入步骤名的别名（短形式 → 标准名）
@@ -548,8 +549,10 @@ def rerun_steps(
         from src.agents.bear import BearResearcher  # noqa: F401
         from src.agents.bull import BullResearcher  # noqa: F401
         from src.agents.fact_check import FactCheckerAgent
+        from src.agents.cornerstone import CornerstoneAgent
         klass_map = {
             "prospectus_analyst": ProspectusAnalystAgent,
+            "cornerstone": CornerstoneAgent,
             "industry": IndustryAgent,
             "macro": MacroAgent,
             "comparable": ComparableAgent,
@@ -706,9 +709,11 @@ class CornerstoneWorkflow:
         s = get_settings()
         max_rounds = debate_max_rounds if debate_max_rounds is not None else s.debate_max_rounds
 
+        from src.agents.cornerstone import CornerstoneAgent
         from src.agents.fact_check import FactCheckerAgent
         self.steps: list[BaseAgent] = [
             ProspectusAnalystAgent(self.llm, self.summarizer),
+            CornerstoneAgent(self.llm, self.summarizer),  # T2: 接 hkquant 历史业绩
             IndustryAgent(self.llm, self.summarizer),
             MacroAgent(self.llm, self.summarizer),
             ComparableAgent(self.llm, self.summarizer),
