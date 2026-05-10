@@ -4619,6 +4619,286 @@ def test_t4_cli_errors_when_hkquant_unconfigured(capsys) -> None:
         get_settings.cache_clear()
 
 
+# ============================================================================
+# T5: KnowledgeBaseRAG — 本地通用知识库 RAG
+# ============================================================================
+
+class _FakeKBCollection:
+    """模拟 ChromaDB Collection 的最小接口 — 避免测试下载 BGE 模型."""
+
+    def __init__(self):
+        self._store: dict[str, tuple[str, dict]] = {}
+
+    def _match_where(self, meta: dict, where: dict | None) -> bool:
+        if not where:
+            return True
+        return all(meta.get(k) == v for k, v in where.items())
+
+    def upsert(self, *, ids, documents, metadatas):
+        for i, d, m in zip(ids, documents, metadatas):
+            self._store[i] = (d, m)
+
+    def query(self, *, query_texts, n_results, where=None, **kw):
+        items = [it for it in self._store.items()
+                 if self._match_where(it[1][1], where)]
+        items = items[:n_results]
+        return {
+            "documents": [[t[1][0] for t in items]],
+            "metadatas": [[t[1][1] for t in items]],
+            "distances": [[0.1] * len(items)],
+        }
+
+    def get(self, *, where=None, limit=None):
+        items = [it for it in self._store.items()
+                 if self._match_where(it[1][1], where)]
+        if limit:
+            items = items[:limit]
+        return {
+            "ids": [t[0] for t in items],
+            "metadatas": [t[1][1] for t in items],
+            "documents": [t[1][0] for t in items],
+        }
+
+    def delete(self, *, ids):
+        for i in ids:
+            self._store.pop(i, None)
+
+    def count(self):
+        return len(self._store)
+
+
+def _patch_kb(kb):
+    """禁掉 _ensure (避免 chromadb / BGE 加载) + 注入 fake collection."""
+    kb._collection = _FakeKBCollection()
+    kb._ensure = lambda: None
+    return kb
+
+
+def test_t5_split_paragraphs_basic() -> None:
+    """空行切段 + 单段不超过 max_chars 时不切."""
+    from src.data.knowledge_base import _split_paragraphs
+    text = "第一段.\n\n第二段。\n\n  \n第三段"
+    out = _split_paragraphs(text, max_chars=1000)
+    assert out == ["第一段.", "第二段。", "第三段"]
+
+
+def test_t5_split_paragraphs_sliding_window() -> None:
+    """段超过 max_chars → 滑窗 (max 1000 / overlap 200)."""
+    from src.data.knowledge_base import _split_paragraphs
+    long_p = "a" * 1500
+    out = _split_paragraphs(long_p, max_chars=1000)
+    assert len(out) >= 2
+    assert all(len(c) <= 1000 for c in out)
+
+
+def test_t5_load_markdown_by_headings(tmp_path) -> None:
+    """按 H1/H2/H3 切, 保留 heading 链路."""
+    from src.data.knowledge_base import load_markdown
+    p = tmp_path / "notes.md"
+    p.write_text(
+        "# 监管笔记\n\n## SFC 2025-10\n\n18C 准入收紧, 营收门槛上调.\n\n"
+        "## HKEX 2025-11\n\n聆讯反馈例子.\n\n# 复盘\n\n破发案例 XX 公司.",
+        encoding="utf-8",
+    )
+    chunks = load_markdown(p, "notes.md", "deadbeefcafe1234")
+    assert len(chunks) == 3
+    headings = [c.heading for c in chunks]
+    assert "监管笔记 > SFC 2025-10" in headings
+    assert "监管笔记 > HKEX 2025-11" in headings
+    assert "复盘" in headings
+    assert all(c.source_type == "md" for c in chunks)
+    assert all(c.source_path == "notes.md" for c in chunks)
+    assert chunks[0].chunk_id.startswith("deadbeef_")
+
+
+def test_t5_load_markdown_no_headings(tmp_path) -> None:
+    """无 heading 的 md → 按段落切, heading='', 不报错."""
+    from src.data.knowledge_base import load_markdown
+    p = tmp_path / "flat.md"
+    p.write_text("paragraph one.\n\nparagraph two.", encoding="utf-8")
+    chunks = load_markdown(p, "flat.md", "h" * 16)
+    assert len(chunks) == 2
+    assert all(c.heading == "" for c in chunks)
+
+
+def test_t5_load_text_paragraphs(tmp_path) -> None:
+    """txt 按段落切."""
+    from src.data.knowledge_base import load_text
+    p = tmp_path / "n.txt"
+    p.write_text("para 1.\n\npara 2.", encoding="utf-8")
+    chunks = load_text(p, "n.txt", "h" * 16)
+    assert len(chunks) == 2
+    assert chunks[0].source_type == "txt"
+
+
+def test_t5_load_file_dispatch_by_extension(tmp_path) -> None:
+    """load_file 按扩展名 dispatch; 不支持的扩展返 []."""
+    from src.data.knowledge_base import load_file
+    md = tmp_path / "x.md"
+    md.write_text("# 标题\n\n内容.", encoding="utf-8")
+    txt = tmp_path / "x.txt"
+    txt.write_text("text.", encoding="utf-8")
+    csv = tmp_path / "x.csv"
+    csv.write_text("a,b\n1,2", encoding="utf-8")
+
+    h_md, c_md = load_file(md, ingest_root=tmp_path)
+    h_txt, c_txt = load_file(txt, ingest_root=tmp_path)
+    h_csv, c_csv = load_file(csv, ingest_root=tmp_path)
+
+    assert len(c_md) == 1 and c_md[0].source_type == "md"
+    assert len(c_txt) == 1 and c_txt[0].source_type == "txt"
+    assert c_csv == []   # csv 不支持
+    assert len(h_md) == 64  # sha256 hex
+
+
+def test_t5_ingest_directory_indexes_supported_files(tmp_path) -> None:
+    """ingest_directory: 扫目录, md+txt 命中, 其他跳过."""
+    from src.data.knowledge_base import KnowledgeBaseRAG
+    (tmp_path / "a.md").write_text("# A\n\nbody a", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("body b", encoding="utf-8")
+    (tmp_path / "skip.json").write_text("{}", encoding="utf-8")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "c.md").write_text("# C\n\nbody c", encoding="utf-8")
+
+    kb = _patch_kb(KnowledgeBaseRAG())
+    stats = kb.ingest_directory(tmp_path)
+    assert stats["files_scanned"] == 3            # md+txt+md (json 不计)
+    assert stats["files_skipped_unsupported"] == 1
+    assert stats["files_indexed"] == 3
+    assert stats["chunks_inserted"] >= 3
+    assert kb.count() >= 3
+
+
+def test_t5_ingest_idempotent_skips_unchanged(tmp_path) -> None:
+    """同一文件第二次 ingest, 内容未变 → skip; 改了内容 → delete + reinsert."""
+    from src.data.knowledge_base import KnowledgeBaseRAG
+    f = tmp_path / "n.md"
+    f.write_text("# A\n\nv1", encoding="utf-8")
+
+    kb = _patch_kb(KnowledgeBaseRAG())
+    s1 = kb.ingest_directory(tmp_path)
+    assert s1["files_indexed"] == 1
+    initial = kb.count()
+
+    # 第二次同内容 → 跳过
+    s2 = kb.ingest_directory(tmp_path)
+    assert s2["files_skipped_unchanged"] == 1
+    assert s2["files_indexed"] == 0
+    assert s2["chunks_inserted"] == 0
+    assert kb.count() == initial
+
+    # 改内容 → 旧 chunks 删 + 重插
+    f.write_text("# A\n\nv2 改了内容", encoding="utf-8")
+    s3 = kb.ingest_directory(tmp_path)
+    assert s3["files_skipped_unchanged"] == 0
+    assert s3["files_indexed"] == 1
+    assert s3["chunks_deleted_stale"] >= 1
+
+
+def test_t5_search_returns_metadata(tmp_path) -> None:
+    """search 返回 text + source_path + heading + distance."""
+    from src.data.knowledge_base import KnowledgeBaseRAG
+    (tmp_path / "n.md").write_text(
+        "# 监管\n\n## SFC\n\n18C 收紧。\n", encoding="utf-8",
+    )
+    kb = _patch_kb(KnowledgeBaseRAG())
+    kb.ingest_directory(tmp_path)
+    hits = kb.search("随便查", k=3)
+    assert len(hits) >= 1
+    assert hits[0]["source_path"] == "n.md"
+    assert "SFC" in hits[0]["heading"]
+    assert hits[0]["source_type"] == "md"
+    assert "distance" in hits[0]
+
+
+def test_t5_search_filters_by_source_type(tmp_path) -> None:
+    """source_type='md' 只返 md."""
+    from src.data.knowledge_base import KnowledgeBaseRAG
+    (tmp_path / "a.md").write_text("# A\n\n内容 md", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("内容 txt", encoding="utf-8")
+    kb = _patch_kb(KnowledgeBaseRAG())
+    kb.ingest_directory(tmp_path)
+    hits_md = kb.search("内容", k=10, source_type="md")
+    assert all(h["source_type"] == "md" for h in hits_md)
+    hits_txt = kb.search("内容", k=10, source_type="txt")
+    assert all(h["source_type"] == "txt" for h in hits_txt)
+
+
+def test_t5_list_indexed_files_aggregates(tmp_path) -> None:
+    """list_indexed_files 按 source_path 聚合 chunk 数."""
+    from src.data.knowledge_base import KnowledgeBaseRAG
+    (tmp_path / "x.md").write_text(
+        "# A\n\nP1.\n\n## B\n\nP2.", encoding="utf-8",
+    )
+    (tmp_path / "y.txt").write_text("only one para", encoding="utf-8")
+    kb = _patch_kb(KnowledgeBaseRAG())
+    kb.ingest_directory(tmp_path)
+    files = kb.list_indexed_files()
+    paths = {f["source_path"] for f in files}
+    assert paths == {"x.md", "y.txt"}
+    # x.md 有两个 section 各一段 → 2 chunks
+    x_entry = next(f for f in files if f["source_path"] == "x.md")
+    assert x_entry["chunks"] == 2
+    assert x_entry["source_type"] == "md"
+
+
+def test_t5_render_kb_results_md_with_heading() -> None:
+    """带 heading 的渲染应用 # 引用语法."""
+    from src.data.knowledge_base import render_kb_results_md
+    md = render_kb_results_md([
+        {"text": "原文段.", "source_path": "笔记/2025.md",
+         "heading": "监管 > SFC", "page": 0, "distance": 0.12},
+    ])
+    assert "[KB: 笔记/2025.md#监管 > SFC]" in md
+    assert "0.120" in md
+    assert "原文段" in md
+
+
+def test_t5_render_kb_results_md_with_page() -> None:
+    """PDF 的渲染应用 :p 引用语法."""
+    from src.data.knowledge_base import render_kb_results_md
+    md = render_kb_results_md([
+        {"text": "pdf 段.", "source_path": "regs.pdf",
+         "heading": "", "page": 7, "distance": 0.5},
+    ])
+    assert "[KB: regs.pdf:p7]" in md
+
+
+def test_t5_render_kb_results_empty() -> None:
+    from src.data.knowledge_base import render_kb_results_md
+    assert "无相关内容" in render_kb_results_md([])
+
+
+def test_t5_ingest_raises_on_missing_dir(tmp_path) -> None:
+    """目录不存在 → FileNotFoundError."""
+    from src.data.knowledge_base import KnowledgeBaseRAG
+    import pytest
+    kb = _patch_kb(KnowledgeBaseRAG())
+    with pytest.raises(FileNotFoundError):
+        kb.ingest_directory(tmp_path / "does_not_exist")
+
+
+def test_t5_cli_query_errors_when_empty(tmp_path, monkeypatch, capsys) -> None:
+    """CLI query: KB 空 → 退出码 2 + stderr 提示."""
+    from src.data import knowledge_base as kb_mod
+    # 让 KnowledgeBaseRAG() 总是返回 fake 空 collection
+    orig_init = kb_mod.KnowledgeBaseRAG.__init__
+    def patched(self, *a, **kw):
+        orig_init(self, *a, **kw)
+        self._collection = _FakeKBCollection()
+        self._ensure = lambda: None
+    monkeypatch.setattr(kb_mod.KnowledgeBaseRAG, "__init__", patched)
+    rc = kb_mod.main(["query", "x"])
+    assert rc == 2
+    assert "ingest" in capsys.readouterr().err
+
+
+def test_t5_supported_exts_constant() -> None:
+    from src.data.knowledge_base import SUPPORTED_EXTS
+    assert set(SUPPORTED_EXTS) == {".md", ".markdown", ".txt", ".pdf"}
+
+
 def test_feedback_store_theme_cache_ttl(tmp_path) -> None:
     """缓存超过 TTL 应失效返 None."""
     from datetime import datetime, timedelta
