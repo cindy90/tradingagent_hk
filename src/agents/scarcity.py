@@ -20,6 +20,7 @@ from loguru import logger
 from src.agents._template import TemplateAgent
 from src.agents.base import AgentContext
 from src.agents.theme_classifier import ThemeClassifier
+from src.data import hkquant_client
 from src.data.ifind_ipo_queue import QueuedCompany, get_hk_ipo_queue
 from src.feedback.models import ScarcityScoreCard
 from src.feedback.store import FeedbackStore
@@ -200,10 +201,48 @@ class ScarcityAgent(TemplateAgent):
         except Exception as e:
             logger.warning(f"[ScarcityAgent] 流量稀缺度获取失败 (降级到仅存量): {e}")
 
-        # 引擎算确定性指标 (含流量)
+        # T1: 若配置了 hkquant DB, 拉历史 IPO 全量统计作权威覆盖
+        # (upstream peers 列表常被截短到 5-10 家, hkquant 是港股全市场 ground truth)
+        hk_listed_override: int | None = None
+        hk_recent_override: int | None = None
+        hk_avg_fdr_override: float | None = None
+        hk_peer_sample: list[dict] = []
+        if target_theme and hkquant_client.is_available():
+            try:
+                hk_peers = hkquant_client.get_listed_peers_by_theme(
+                    target_theme, lookback_years=5, limit=200,
+                )
+                hk_listed_override = len(hk_peers)
+                hk_recent_override = hkquant_client.get_recent_ipo_count_in_theme(
+                    target_theme, lookback_days=365,
+                )
+                hk_avg_fdr_override = hkquant_client.get_avg_first_day_return_in_theme(
+                    target_theme, lookback_days=365, min_samples=3,
+                )
+                hk_peer_sample = [
+                    {
+                        "stock_code": p.stock_code, "name": p.name,
+                        "listing_date": p.listing_date,
+                        "return_d1_close": p.return_d1_close,
+                        "return_d30": p.return_d30, "return_m6": p.return_m6,
+                    }
+                    for p in hk_peers[:10]
+                ]
+                logger.info(
+                    f"[ScarcityAgent] hkquant 历史回溯: 同主题 {hk_listed_override} 家 / "
+                    f"过去 12 月 {hk_recent_override} 家 IPO / 首日均值 "
+                    f"{hk_avg_fdr_override}%"
+                )
+            except Exception as e:
+                logger.warning(f"[ScarcityAgent] hkquant 历史回溯失败 (降级): {e}")
+
+        # 引擎算确定性指标 (含流量 + hkquant 历史覆盖)
         stats = compute_scarcity_stats(
             peers, target_ticker=target_ticker,
             pipeline_companies_in_theme=pipeline_matched,
+            override_listed_count_in_theme=hk_listed_override,
+            override_recent_ipo_count_12m=hk_recent_override,
+            override_avg_first_day_return_pct=hk_avg_fdr_override,
         )
         # 写入 ctx.extras 供下游 SentimentAgent / DecisionAgent 引用
         ctx.extras.misc["engine_scarcity"] = {
@@ -216,6 +255,7 @@ class ScarcityAgent(TemplateAgent):
             "raw_scarcity_score": stats.raw_scarcity_score,
             "rationale": stats.rationale,
             "warnings": stats.warnings,
+            "hkquant_peer_sample": hk_peer_sample,
         }
         stats_md = render_stats_for_prompt(stats)
         target_md = _render_target_metadata(ctx)

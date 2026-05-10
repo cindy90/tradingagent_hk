@@ -168,14 +168,24 @@ class MacroAgent(TemplateAgent):
         # 港股 IPO 破发率（基于 ctx.extras.recent_hk_ipos 已有的 first_day_open 数据）
         ipo_break_block = self._compute_ipo_break_rate_block(ctx)
 
+        # T1: hkquant market_environment_cache (已 prefetch 入 ctx.extras.misc)
+        hkq_env_md = ctx.extras.misc.get("hkquant_market_env_md", "") if (
+            hasattr(ctx.extras, "misc") and ctx.extras.misc
+        ) else ""
+        hkq_block = f"\n# hkquant 月度市场环境 (regime gate)\n{hkq_env_md}\n" if hkq_env_md else ""
+
         return (
             f"# 项目\n{ctx.company_name} ({ctx.ticker})  行业: {ctx.industry}\n\n"
             f"# 港股三大指数（来自 iFinD THS_HQ + THS_BD，最新交易日数据）\n"
             f"{_render_indices_md(indices)}\n\n"
             f"# 宏观指标（同花顺 EDB, 含历史分位）\n{macro_block}\n\n"
-            f"# 近期港股 IPO 首日破发统计\n{ipo_break_block}\n\n"
+            f"# 近期港股 IPO 首日破发统计\n{ipo_break_block}\n"
+            f"{hkq_block}\n"
             f"请输出宏观策略分析。第三节'恒指估值'必须引用上方 HSI PE 数据 + 历史分位（若 EDB 有），"
             f"第五节'板块偏好'引用三大指数 30/90 日变动对比。"
+            f"如 'hkquant 月度市场环境' 块存在, 在第六节 'IPO 节奏' 中**必须**引用其"
+            f"'港股近 30 日 IPO 破发率' + 'HSI 波动百分位' 作 regime gate 判断 "
+            f"(高破发率 + 高波动 → IPO 寒冬, 慎参与)."
         )
 
     @staticmethod

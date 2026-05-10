@@ -94,6 +94,9 @@ def compute_scarcity_stats(
     liquidity_threshold_hkd: float = 5e7,  # 5000 万 HKD
     today: date | None = None,
     pipeline_companies_in_theme: list[str] | None = None,
+    override_recent_ipo_count_12m: int | None = None,
+    override_avg_first_day_return_pct: float | None = None,
+    override_listed_count_in_theme: int | None = None,
 ) -> ScarcityStats:
     """从 peers 列表 (含市值 / 30 日均成交 / IPO 日期 / 首日涨幅) 算稀缺度统计.
 
@@ -104,6 +107,10 @@ def compute_scarcity_stats(
         today: 用于计算"过去 12 月", 测试可注入
         pipeline_companies_in_theme: 同主题港股 IPO 排队中公司名列表
             (来自 ifind_ipo_queue + theme_classifier 命中). v2 流量稀缺度.
+        override_recent_ipo_count_12m: 若提供, 覆盖从 peers 推出的 12 月 IPO 数
+            (T1 hkquant 历史回溯权威值优先; 因 upstream peers 列表通常截短到 5-10 家)
+        override_avg_first_day_return_pct: 若提供, 覆盖首日开盘均值 (同上)
+        override_listed_count_in_theme: 若提供, 覆盖同主题已上市数 (hkquant 全量)
 
     Returns: ScarcityStats — 全部确定性, LLM 不参与
     """
@@ -122,7 +129,12 @@ def compute_scarcity_stats(
     pipeline_count = len(pipeline_companies)
 
     n = len(peers)
-    if n == 0:
+    has_overrides = (
+        override_listed_count_in_theme is not None
+        or override_recent_ipo_count_12m is not None
+        or override_avg_first_day_return_pct is not None
+    )
+    if n == 0 and not has_overrides:
         warnings.append("peer 列表为空, 无法量化稀缺度")
         return ScarcityStats(
             listed_count_in_theme=0, market_cap_total_hkd_b=0.0,
@@ -169,6 +181,8 @@ def compute_scarcity_stats(
     ]
     first_day_returns = [r for r in first_day_returns if r is not None]
     avg_fdr = statistics.mean(first_day_returns) if first_day_returns else None
+    if override_avg_first_day_return_pct is not None:
+        avg_fdr = override_avg_first_day_return_pct
 
     # 4) 过去 12 月 IPO 数量
     cutoff = today or date.today()
@@ -176,6 +190,13 @@ def compute_scarcity_stats(
         1 for p in peers
         if _is_recent_ipo(p.get("ipo_date"))
     )
+    if override_recent_ipo_count_12m is not None:
+        recent_count = override_recent_ipo_count_12m
+
+    # listed_count_in_theme 也允许 hkquant 全量覆盖 peers 列表的截短样本
+    listed_count = override_listed_count_in_theme if (
+        override_listed_count_in_theme is not None
+    ) else n
 
     # 5) 引擎初算 raw_scarcity_score (1-5, 5=最稀缺)
     # 启发式 (LLM 可在 rationale 里覆盖):
@@ -187,18 +208,18 @@ def compute_scarcity_stats(
     # - top3 市值占比 > 75% → -0.5 (龙头垄断, 中小被边缘化)
     # - 最近 12 月已发 ≥ 3 家 → -0.5 (边际稀缺度递减)
     score = 3.0  # 中性起点
-    if n <= 2:
+    if listed_count <= 2:
         score += 1.5
-        rationale.append(f"同主题港股仅 {n} 家 → 独苗赛道, +1.5 分")
-    elif n <= 5:
+        rationale.append(f"同主题港股仅 {listed_count} 家 → 独苗赛道, +1.5 分")
+    elif listed_count <= 5:
         score += 1.0
-        rationale.append(f"同主题 {n} 家 → 偏稀缺, +1.0 分")
-    elif n <= 10:
+        rationale.append(f"同主题 {listed_count} 家 → 偏稀缺, +1.0 分")
+    elif listed_count <= 10:
         score += 0.5
-        rationale.append(f"同主题 {n} 家 → 中等供给, +0.5 分")
+        rationale.append(f"同主题 {listed_count} 家 → 中等供给, +0.5 分")
     else:
         score -= 0.5
-        rationale.append(f"同主题 {n} 家 → 红海, -0.5 分")
+        rationale.append(f"同主题 {listed_count} 家 → 红海, -0.5 分")
 
     if thinning_ratio is not None and thinning_ratio > 0.5:
         score -= 0.5
@@ -241,7 +262,7 @@ def compute_scarcity_stats(
     score = max(1.0, min(5.0, score))
 
     return ScarcityStats(
-        listed_count_in_theme=n,
+        listed_count_in_theme=listed_count,
         market_cap_total_hkd_b=round(cap_total, 2) if cap_total else 0.0,
         market_cap_top3_share=round(top3_share, 4) if top3_share is not None else None,
         median_market_cap_hkd_b=round(median_cap, 2) if median_cap is not None else None,

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     ifind_password: str = Field(default="", alias="IFIND_PASSWORD")
     hkex_api_key: str = Field(default="", alias="HKEX_API_KEY")
 
+    # hkquant 项目 SQLite DB 绝对路径 (HK IPO 历史 + cornerstone + market env)
+    # 未设置时, 所有 hkquant 接入降级为 no-op (现有流程不变)
+    hkquant_db_path: str = Field(default="", alias="HKQUANT_DB_PATH")
+
     data_dir: Path = Field(default=Path("./data"), alias="DATA_DIR")
     cache_dir: Path = Field(default=Path("./.cache"), alias="CACHE_DIR")
     reports_dir: Path = Field(default=Path("./reports"), alias="REPORTS_DIR")

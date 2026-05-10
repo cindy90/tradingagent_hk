@@ -3474,6 +3474,211 @@ def test_resolve_pipeline_empty_when_no_classifier() -> None:
     assert matched == []
 
 
+# ============================================================================
+# T1: hkquant DB adapter — 历史 IPO peer + market environment regime
+# ============================================================================
+
+def _build_hkquant_fixture_db(tmp_path):
+    """构造一个最小 hkquant schema fixture (in-file SQLite),
+    mirror src/data/schema.py 的关键字段."""
+    import sqlite3
+    db_path = tmp_path / "nacs_fixture.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE ipo_master (
+            ipo_id TEXT PRIMARY KEY, stock_code TEXT NOT NULL,
+            company_name_zh TEXT, company_name_en TEXT,
+            listing_date DATE NOT NULL, listing_chapter TEXT NOT NULL,
+            gics_l2 TEXT, offer_price_hkd REAL, offering_size_hkd REAL,
+            is_delisted INTEGER DEFAULT 0
+        );
+        CREATE TABLE ipo_returns (
+            ipo_id TEXT PRIMARY KEY,
+            return_d1_close REAL, return_d30 REAL, return_m6 REAL,
+            return_m12 REAL, avg_daily_volume_hkd REAL
+        );
+        CREATE TABLE market_environment_cache (
+            asof_month DATE PRIMARY KEY,
+            hsi_60d_return REAL, hsi_60d_vol_annualized REAL,
+            hsi_60d_vol_pct_rank REAL, hsi_valuation_pct REAL,
+            hk_ipo_30d_avg_d30 REAL, hk_ipo_30d_breakage_rate REAL,
+            southbound_30d_net_normalized REAL, sector_60d_vol_annualized REAL,
+            source TEXT
+        );
+    """)
+    # 3 家 Bio_Pharma 同主题 IPO (近 12 月内 2 家)
+    conn.executemany(
+        "INSERT INTO ipo_master (ipo_id, stock_code, company_name_zh, "
+        "listing_date, listing_chapter, gics_l2, offer_price_hkd, offering_size_hkd) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("ipo_a", "1001.HK", "甲生物", "2026-04-01", "18A",
+             "Pharmaceuticals, Biotechnology & Life Sciences", 30.0, 1e9),
+            ("ipo_b", "1002.HK", "乙药业", "2025-11-15", "Main",
+             "Pharmaceuticals", 25.0, 8e8),
+            ("ipo_c", "1003.HK", "丙制药", "2024-03-01", "18A",
+             "Biotechnology", 40.0, 1.5e9),
+            # 异主题不应被命中
+            ("ipo_d", "1004.HK", "丁科技", "2026-01-10", "Main",
+             "Software & Services", 50.0, 2e9),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO ipo_returns (ipo_id, return_d1_close, return_d30, "
+        "return_m6, return_m12, avg_daily_volume_hkd) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("ipo_a", 0.10, 0.05, -0.10, None, 5e7),
+            ("ipo_b", 0.20, 0.15, 0.05, 0.30, 1.2e8),
+            ("ipo_c", -0.05, -0.10, -0.20, -0.15, 3e7),
+            ("ipo_d", 0.30, 0.25, 0.40, 0.55, 5e8),
+        ],
+    )
+    conn.execute(
+        "INSERT INTO market_environment_cache "
+        "(asof_month, hsi_60d_return, hsi_60d_vol_annualized, "
+        "hsi_60d_vol_pct_rank, hsi_valuation_pct, hk_ipo_30d_avg_d30, "
+        "hk_ipo_30d_breakage_rate, southbound_30d_net_normalized, "
+        "sector_60d_vol_annualized, source) VALUES "
+        "('2026-04-01', 0.05, 0.18, 0.45, 0.60, 0.08, 0.35, 0.7, 0.22, 'test')"
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_hkquant_adapter_silent_when_unconfigured() -> None:
+    """HKQUANT_DB_PATH 未配置时, 所有查询返空且不抛."""
+    import os
+    from src.data import hkquant_client
+    # 确保 env 没值; 配置默认空字符串
+    old = os.environ.pop("HKQUANT_DB_PATH", None)
+    from config import get_settings
+    get_settings.cache_clear()  # 清 lru_cache
+    try:
+        assert hkquant_client.is_available() is False
+        assert hkquant_client.get_listed_peers_by_theme("Bio_Pharma") == []
+        assert hkquant_client.get_recent_ipo_count_in_theme("Bio_Pharma") == 0
+        assert hkquant_client.get_avg_first_day_return_in_theme("Bio_Pharma") is None
+        assert hkquant_client.get_market_environment_at() is None
+    finally:
+        if old:
+            os.environ["HKQUANT_DB_PATH"] = old
+        get_settings.cache_clear()
+
+
+def test_hkquant_get_listed_peers_by_theme(tmp_path) -> None:
+    """db_path 注入: 查 Bio_Pharma 应命中 3 家 (gics_l2 三种变体), 不命中科技."""
+    from src.data import hkquant_client
+    db = _build_hkquant_fixture_db(tmp_path)
+    peers = hkquant_client.get_listed_peers_by_theme(
+        "Bio_Pharma", db_path=db, asof_date="2026-05-10",
+    )
+    assert len(peers) == 3
+    codes = {p.stock_code for p in peers}
+    assert "1001.HK" in codes and "1004.HK" not in codes
+    # ORDER BY listing_date DESC
+    assert peers[0].stock_code == "1001.HK"
+
+
+def test_hkquant_get_recent_ipo_count(tmp_path) -> None:
+    """过去 365 天 Bio_Pharma 应是 2 家 (ipo_a 2026-04 + ipo_b 2025-11)."""
+    from src.data import hkquant_client
+    db = _build_hkquant_fixture_db(tmp_path)
+    n = hkquant_client.get_recent_ipo_count_in_theme(
+        "Bio_Pharma", db_path=db, asof_date="2026-05-10", lookback_days=365,
+    )
+    assert n == 2
+
+
+def test_hkquant_get_avg_first_day_return(tmp_path) -> None:
+    """过去 12 月 Bio_Pharma 首日 close 均值: (10% + 20%)/2 = 15.0."""
+    from src.data import hkquant_client
+    db = _build_hkquant_fixture_db(tmp_path)
+    avg = hkquant_client.get_avg_first_day_return_in_theme(
+        "Bio_Pharma", db_path=db, asof_date="2026-05-10",
+        lookback_days=365, min_samples=2,
+    )
+    assert avg == 15.0
+
+
+def test_hkquant_avg_first_day_return_min_samples_guard(tmp_path) -> None:
+    """min_samples 不满足时返 None."""
+    from src.data import hkquant_client
+    db = _build_hkquant_fixture_db(tmp_path)
+    avg = hkquant_client.get_avg_first_day_return_in_theme(
+        "Bio_Pharma", db_path=db, asof_date="2026-05-10",
+        lookback_days=365, min_samples=10,
+    )
+    assert avg is None
+
+
+def test_hkquant_get_market_environment_at(tmp_path) -> None:
+    """market_environment_cache 取 ≤ asof 最新月份."""
+    from src.data import hkquant_client
+    db = _build_hkquant_fixture_db(tmp_path)
+    env = hkquant_client.get_market_environment_at(
+        asof_date="2026-05-10", db_path=db,
+    )
+    assert env is not None
+    assert env.asof_month == "2026-04-01"
+    assert env.hk_ipo_30d_breakage_rate == 0.35
+    assert env.hsi_60d_vol_pct_rank == 0.45
+
+
+def test_hkquant_render_market_env_md(tmp_path) -> None:
+    """render_market_env_md 输出包含 regime gate 关键字段."""
+    from src.data import hkquant_client
+    db = _build_hkquant_fixture_db(tmp_path)
+    env = hkquant_client.get_market_environment_at(
+        asof_date="2026-05-10", db_path=db,
+    )
+    md = hkquant_client.render_market_env_md(env)
+    assert "破发率" in md and "regime gate" in md
+    assert "35.0%" in md  # breakage rate
+    assert "45.0%" in md  # vol pct rank
+
+
+def test_hkquant_invalid_theme_returns_empty(tmp_path) -> None:
+    """unknown theme / 'Other' 都不应去查 DB, 返 []."""
+    from src.data import hkquant_client
+    db = _build_hkquant_fixture_db(tmp_path)
+    assert hkquant_client.get_listed_peers_by_theme("Other", db_path=db) == []
+    assert hkquant_client.get_recent_ipo_count_in_theme(
+        "Other", db_path=db,
+    ) == 0
+
+
+def test_scarcity_engine_overrides_honored_with_empty_peers() -> None:
+    """空 peer 列表 + overrides → engine 走主路径 (不再 early-return),
+    listed/recent/fdr 全部用 override 值."""
+    from src.tools.scarcity import compute_scarcity_stats
+    stats = compute_scarcity_stats(
+        [], target_ticker="X.HK",
+        override_listed_count_in_theme=15,
+        override_recent_ipo_count_12m=8,
+        override_avg_first_day_return_pct=12.5,
+    )
+    assert stats.listed_count_in_theme == 15
+    assert stats.recent_ipo_count_12m == 8
+    assert stats.avg_first_day_return_pct == 12.5
+    # 15 家 → -0.5 (红海); 12 月 8 ≥ 3 → -0.5; 共 2.0
+    assert stats.raw_scarcity_score == 2.0
+
+
+def test_scarcity_engine_override_listed_count_only() -> None:
+    """只覆盖 listed_count, 其他从 peers 推."""
+    from src.tools.scarcity import compute_scarcity_stats
+    peers = [{"thscode": "P1.HK", "market_cap_hkd_b": 100,
+              "avg_turnover_30d_hkd": 2e8, "ipo_date": "2018-01-01"}]
+    # peers 算的 n=1 → +1.5; 用 override=15 应改为 -0.5 红海
+    stats = compute_scarcity_stats(
+        peers, target_ticker="X.HK",
+        override_listed_count_in_theme=15,
+    )
+    assert stats.listed_count_in_theme == 15
+    assert any("红海" in r for r in stats.rationale)
+
+
 def test_feedback_store_theme_cache_ttl(tmp_path) -> None:
     """缓存超过 TTL 应失效返 None."""
     from datetime import datetime, timedelta

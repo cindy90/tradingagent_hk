@@ -277,6 +277,23 @@ def _prefetch_ifind_sdk(
     except Exception as e:
         logger.warning(f"[Prefetch] 港股指数查询失败: {e}")
 
+    # T1: hkquant market_environment_cache (regime gate)
+    hkquant_market_env_md = ""
+    try:
+        from src.data import hkquant_client
+        if hkquant_client.is_available():
+            env = hkquant_client.get_market_environment_at()
+            if env is not None:
+                hkquant_market_env_md = hkquant_client.render_market_env_md(env)
+                logger.info(
+                    f"[Prefetch] hkquant market_env asof {env.asof_month}: "
+                    f"HK IPO 30d 破发率="
+                    f"{(env.hk_ipo_30d_breakage_rate or 0) * 100:.1f}% / "
+                    f"HSI vol pct={(env.hsi_60d_vol_pct_rank or 0) * 100:.0f}%"
+                )
+    except Exception as e:
+        logger.warning(f"[Prefetch] hkquant market_env 失败: {e}")
+
     return {
         "peers": peers_info,
         "peer_recent_quotes": quotes,
@@ -284,6 +301,7 @@ def _prefetch_ifind_sdk(
         "target_valuation": target_data,
         "peer_announcements": peer_announcements,
         "market_indices": market_indices,
+        "hkquant_market_env_md": hkquant_market_env_md,
     }
 
 
@@ -476,6 +494,8 @@ def rerun_steps(
                 wf_extras.target_valuation = sdk_data.get("target_valuation")
                 wf_extras.peer_announcements = sdk_data.get("peer_announcements", {})
                 wf_extras.market_indices = sdk_data.get("market_indices", [])
+                if sdk_data.get("hkquant_market_env_md"):
+                    wf_extras.misc["hkquant_market_env_md"] = sdk_data["hkquant_market_env_md"]
                 tv = sdk_data.get("target_valuation") or {}
                 if tv.get("revenue"):
                     wf_extras.target_revenue = float(tv["revenue"])
@@ -878,6 +898,8 @@ class CornerstoneWorkflow:
             ctx.extras.target_valuation = sdk_data.get("target_valuation")
             ctx.extras.peer_announcements = sdk_data.get("peer_announcements", {})
             ctx.extras.market_indices = sdk_data.get("market_indices", [])
+            if sdk_data.get("hkquant_market_env_md"):
+                ctx.extras.misc["hkquant_market_env_md"] = sdk_data["hkquant_market_env_md"]
             # 同步 target 营收/净利到既有字段, 让 comparable_valuation 工具能用
             tv = sdk_data.get("target_valuation") or {}
             if tv.get("revenue"):
